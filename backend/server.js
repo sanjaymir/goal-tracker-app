@@ -16,14 +16,14 @@ const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-me";
 const ALLOWED_ORIGINS = [
   "http://localhost:5173",
   "http://localhost:5174",
-  // troque abaixo pelo domínio real do Netlify quando tiver:
-  "https://seu-front-netlify.netlify.app",
+  // troque abaixo pela URL REAL do Netlify
+  "sorridentsqms.netlify.app",
 ];
 
 app.use(
   cors({
     origin: (origin, callback) => {
-      // chamadas sem origin (ex.: curl, Postman) -> libera
+      // chamadas sem origin (curl, Postman, etc) → libera
       if (!origin) return callback(null, true);
 
       if (ALLOWED_ORIGINS.includes(origin)) {
