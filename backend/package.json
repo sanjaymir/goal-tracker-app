@@ -1,0 +1,17 @@
+{
+  "name": "goal-tracker-backend",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "cors": "^2.8.5",
+    "@prisma/client": "^6.x",
+    "jsonwebtoken": "^9.x"
+  },
+  "devDependencies": {
+    "prisma": "^6.x"
+  }
+}

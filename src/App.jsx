@@ -1,0 +1,2309 @@
+import React, { useState, useEffect } from "react";
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+} from "recharts";
+
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || "http://localhost:3000";
+
+// --------- HELPERS DE PERÍODO (SEMANA / MÊS) ----------
+
+function getWeekKey(date) {
+  const d = new Date(
+    Date.UTC(date.getFullYear(), date.getMonth(), date.getDate())
+  );
+  const dayNum = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil(((d - yearStart) / 86400000 + 1) / 7);
+  return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, "0")}`;
+}
+
+function getCurrentWeekKey() {
+  return getWeekKey(new Date());
+}
+
+function getCurrentMonthKey() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+// progress indexado por período:
+// { "kpiId-periodType-periodKey": { delivered, value, comment } }
+
+function getCurrentProgress(progress, kpiId, periodType) {
+  const periodKey =
+    periodType === "semanal" ? getCurrentWeekKey() : getCurrentMonthKey();
+  const key = `${kpiId}-${periodType}-${periodKey}`;
+  return progress[key];
+}
+
+// --------- CÁLCULO DE % E SEMÁFORO (ATUAL) ----------
+// Retorna { level: "verde" | "amarelo" | "vermelho" | "neutro", percent, base }
+
+function getKpiPerformance(kpi, progress) {
+  const weeklyStatus = getCurrentProgress(progress, kpi.id, "semanal");
+  const monthlyStatus = getCurrentProgress(progress, kpi.id, "mensal");
+
+  let base = null; // "semanal" ou "mensal"
+  let target = 0;
+  let deliveredValue = 0;
+  let hasRegistro = false;
+
+  if (
+    (kpi.periodicity === "mensal" || kpi.periodicity === "semanal+mensal") &&
+    monthlyStatus &&
+    (monthlyStatus.delivered || monthlyStatus.comment)
+  ) {
+    base = "mensal";
+    hasRegistro = true;
+    target = kpi.targetMonthly || 0;
+    if (monthlyStatus.delivered) {
+      const parsed = parseFloat(monthlyStatus.value || "0");
+      deliveredValue = isNaN(parsed) ? 0 : parsed;
+    } else {
+      deliveredValue = 0;
+    }
+  } else if (
+    (kpi.periodicity === "semanal" || kpi.periodicity === "semanal+mensal") &&
+    weeklyStatus &&
+    (weeklyStatus.delivered || weeklyStatus.comment)
+  ) {
+    base = "semanal";
+    hasRegistro = true;
+    target = kpi.targetWeekly || 0;
+    if (weeklyStatus.delivered) {
+      const parsed = parseFloat(weeklyStatus.value || "0");
+      deliveredValue = isNaN(parsed) ? 0 : parsed;
+    } else {
+      deliveredValue = 0;
+    }
+  }
+
+  if (!hasRegistro) {
+    return { level: "neutro", percent: 0, base: null };
+  }
+
+  let percent = 0;
+
+  if (target && target > 0) {
+    percent = Math.round((deliveredValue / target) * 100);
+  } else {
+    percent = deliveredValue > 0 ? 100 : 0;
+  }
+
+  // trava entre 0 e 200 só pra não explodir
+  percent = Math.max(0, Math.min(percent, 200));
+
+  let level;
+  if (percent >= 100) level = "verde";
+  else if (percent >= 70) level = "amarelo";
+  else level = "vermelho";
+
+  return { level, percent, base };
+}
+
+// --------- CÁLCULO DE % PARA HISTÓRICO ----------
+
+function computeHistoricalPerformance(kpi, periodType, status) {
+  if (!status) return { level: "neutro", percent: 0 };
+
+  let target =
+    periodType === "mensal" ? kpi.targetMonthly || 0 : kpi.targetWeekly || 0;
+
+  let deliveredValue = 0;
+  if (status.delivered) {
+    const parsed = parseFloat(status.value || "0");
+    deliveredValue = isNaN(parsed) ? 0 : parsed;
+  }
+
+  let percent = 0;
+  if (target && target > 0) {
+    percent = Math.round((deliveredValue / target) * 100);
+  } else {
+    percent = status.delivered ? 100 : 0;
+  }
+
+  percent = Math.max(0, Math.min(percent, 200));
+
+  let level;
+  if (percent >= 100) level = "verde";
+  else if (percent >= 70) level = "amarelo";
+  else level = "vermelho";
+
+  return { level, percent };
+}
+
+function getKpiHistory(kpi, periodType, progress, limit = 6) {
+  const prefix = `${kpi.id}-${periodType}-`;
+
+  const records = Object.entries(progress)
+    .filter(([key]) => key.startsWith(prefix))
+    .map(([key, status]) => {
+      const periodKey = key.slice(prefix.length);
+      const perf = computeHistoricalPerformance(kpi, periodType, status);
+
+      const label =
+        periodType === "semanal"
+          ? periodKey.replace(/(\d{4})-W(\d{2})/, "Semana $2 / $1")
+          : periodKey.replace(/(\d{4})-(\d{2})/, "$2/$1");
+
+      return {
+        periodKey,
+        label,
+        status,
+        ...perf,
+      };
+    })
+    .sort((a, b) => (a.periodKey < b.periodKey ? 1 : -1))
+    .slice(0, limit);
+
+  return records;
+}
+
+// ============= APP PRINCIPAL =============
+
+function App() {
+  const [users, setUsers] = useState([]);
+  const [kpis, setKpis] = useState([]);
+  const [progress, setProgress] = useState({});
+
+  const [currentUser, setCurrentUser] = useState(null);
+  const [authToken, setAuthToken] = useState(null);
+
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginError, setLoginError] = useState("");
+
+  const [showRecover, setShowRecover] = useState(false);
+  const [recoverEmail, setRecoverEmail] = useState("");
+  const [recoverMessage, setRecoverMessage] = useState("");
+
+  const [globalError, setGlobalError] = useState("");
+
+  // carrega dados iniciais do backend após login (JWT)
+  useEffect(() => {
+    if (!authToken) return;
+
+    async function loadAll() {
+      try {
+        const [usersRes, kpisRes, progressRes] = await Promise.all([
+          fetch(`${API_BASE_URL}/api/users`, {
+            headers: {
+              Authorization: `Bearer ${authToken}`,
+            },
+          }),
+          fetch(`${API_BASE_URL}/api/kpis`, {
+            headers: {
+              Authorization: `Bearer ${authToken}`,
+            },
+          }),
+          fetch(`${API_BASE_URL}/api/progress`, {
+            headers: {
+              Authorization: `Bearer ${authToken}`,
+            },
+          }),
+        ]);
+
+        if (
+          usersRes.status === 401 ||
+          kpisRes.status === 401 ||
+          progressRes.status === 401
+        ) {
+          setGlobalError("Sessão expirada. Faça login novamente.");
+          handleLogout();
+          return;
+        }
+
+        if (!usersRes.ok || !kpisRes.ok || !progressRes.ok) {
+          throw new Error("Falha ao carregar dados iniciais.");
+        }
+
+        const [usersData, kpisData, progressData] = await Promise.all([
+          usersRes.json(),
+          kpisRes.json(),
+          progressRes.json(),
+        ]);
+
+        setUsers(usersData);
+        setKpis(kpisData);
+        setProgress(progressData);
+        setGlobalError("");
+      } catch (err) {
+        console.error(err);
+        setGlobalError("Erro ao carregar dados do servidor.");
+      }
+    }
+
+    loadAll();
+  }, [authToken]);
+
+  async function handleLogin(e) {
+    e.preventDefault();
+    setLoginError("");
+    setGlobalError("");
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: loginEmail.trim(),
+          password: loginPassword,
+        }),
+      });
+
+      if (!res.ok) {
+        setLoginError("E-mail ou senha inválidos.");
+        return;
+      }
+
+      const data = await res.json();
+      // backend retorna { user, token }
+      if (!data || !data.user || !data.token) {
+        setLoginError("Resposta inválida do servidor.");
+        return;
+      }
+
+      setCurrentUser(data.user);
+      setAuthToken(data.token);
+      setLoginEmail("");
+      setLoginPassword("");
+    } catch (err) {
+      console.error(err);
+      setLoginError("Erro ao conectar com o servidor.");
+    }
+  }
+
+  function handleLogout() {
+    setCurrentUser(null);
+    setAuthToken(null);
+    setUsers([]);
+    setKpis([]);
+    setProgress({});
+    setLoginEmail("");
+    setLoginPassword("");
+  }
+
+  function handleRecoverSubmit(e) {
+    e.preventDefault();
+    const email = recoverEmail.trim();
+    if (!email) return;
+
+    setRecoverMessage(
+      "Se este e-mail estiver cadastrado, você receberá um link para redefinir sua senha (simulação)."
+    );
+  }
+
+  // --------- PROGRESSO (chama backend) ----------
+
+  async function updateProgress(kpiId, periodType, delivered, value, comment) {
+    if (!authToken) {
+      alert("Sessão expirada. Faça login novamente.");
+      handleLogout();
+      return;
+    }
+
+    const periodKey =
+      periodType === "semanal" ? getCurrentWeekKey() : getCurrentMonthKey();
+    const key = `${kpiId}-${periodType}-${periodKey}`;
+
+    const newEntry = {
+      delivered,
+      value: value || "",
+      comment: comment || "",
+    };
+
+    // atualiza estado local para UI ficar instantânea
+    setProgress((prev) => ({
+      ...prev,
+      [key]: newEntry,
+    }));
+
+    try {
+      const headers = {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${authToken}`,
+      };
+
+      const res = await fetch(`${API_BASE_URL}/api/progress`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          kpiId,
+          periodType,
+          periodKey,
+          delivered,
+          value,
+          comment,
+        }),
+      });
+
+      if (res.status === 401) {
+        alert("Sessão expirada. Faça login novamente.");
+        handleLogout();
+      }
+    } catch (err) {
+      console.error("Erro ao salvar progresso no backend", err);
+    }
+  }
+
+  // --------- EXPORT / IMPORT (via backend) ----------
+
+  async function handleExportData() {
+    if (!authToken) {
+      alert("Você precisa estar logado para exportar o backup.");
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/backup/export`, {
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+        },
+      });
+
+      if (res.status === 401) {
+        alert("Sessão expirada. Faça login novamente.");
+        handleLogout();
+        return;
+      }
+
+      if (!res.ok) {
+        alert("Erro ao exportar dados do servidor.");
+        return;
+      }
+
+      const data = await res.json();
+      const json = JSON.stringify(data, null, 2);
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+
+      const d = new Date();
+      const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(
+        2,
+        "0"
+      )}-${String(d.getDate()).padStart(2, "0")}`;
+
+      a.href = url;
+      a.download = `goal-tracker-backup-${dateStr}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error(err);
+      alert("Erro de conexão ao exportar dados.");
+    }
+  }
+
+  async function handleImportData(backupData) {
+    if (!authToken) {
+      alert("Você precisa estar logado para importar o backup.");
+      return;
+    }
+
+    if (!backupData || typeof backupData !== "object") {
+      alert("Arquivo de backup inválido.");
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/backup/import`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify(backupData),
+      });
+
+      if (res.status === 401) {
+        alert("Sessão expirada. Faça login novamente.");
+        handleLogout();
+        return;
+      }
+
+      if (!res.ok) {
+        alert("Erro ao importar backup no servidor.");
+        return;
+      }
+
+      alert("Backup importado com sucesso. A página será recarregada.");
+      window.location.reload();
+    } catch (err) {
+      console.error(err);
+      alert("Erro de conexão ao importar backup.");
+    }
+  }
+
+  // --------- CRUD Usuário (via backend) ----------
+
+  async function handleCreateUser(userData) {
+    if (!authToken) {
+      alert("Sessão expirada. Faça login novamente.");
+      handleLogout();
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/users`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify(userData),
+      });
+
+      if (res.status === 401) {
+        alert("Sessão expirada. Faça login novamente.");
+        handleLogout();
+        return;
+      }
+
+      if (res.status === 409) {
+        alert("Já existe um usuário com esse e-mail.");
+        return;
+      }
+
+      if (!res.ok) {
+        alert("Erro ao criar usuário.");
+        return;
+      }
+
+      const created = await res.json();
+      setUsers((prev) => [...prev, created]);
+    } catch (err) {
+      console.error(err);
+      alert("Erro ao conectar com o servidor ao criar usuário.");
+    }
+  }
+
+  async function handleDeleteUser(userId) {
+    if (!authToken) {
+      alert("Sessão expirada. Faça login novamente.");
+      handleLogout();
+      return;
+    }
+
+    const user = users.find((u) => u.id === userId);
+    if (!user) return;
+
+    if (user.role === "admin") {
+      alert("Não é permitido excluir o usuário admin.");
+      return;
+    }
+
+    const confirmDelete = window.confirm(
+      `Excluir usuário ${user.name} e todos os KPIs dele?`
+    );
+    if (!confirmDelete) return;
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/users/${userId}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+        },
+      });
+
+      if (res.status === 401) {
+        alert("Sessão expirada. Faça login novamente.");
+        handleLogout();
+        return;
+      }
+
+      if (!res.ok) {
+        alert("Erro ao excluir usuário.");
+        return;
+      }
+
+      // remove também no front
+      const kpisToRemove = kpis
+        .filter((k) => k.ownerId === userId)
+        .map((k) => k.id);
+
+      setProgress((prev) => {
+        const updated = {};
+        Object.keys(prev).forEach((key) => {
+          const [idStr] = key.split("-");
+          const idNum = Number(idStr);
+          if (!kpisToRemove.includes(idNum)) {
+            updated[key] = prev[key];
+          }
+        });
+        return updated;
+      });
+
+      setKpis((prev) => prev.filter((k) => k.ownerId !== userId));
+      setUsers((prev) => prev.filter((u) => u.id !== userId));
+    } catch (err) {
+      console.error(err);
+      alert("Erro ao conectar com o servidor ao excluir usuário.");
+    }
+  }
+
+  // --------- CRUD KPI (via backend) ----------
+
+  async function handleCreateKpi(kpiData) {
+    if (!authToken) {
+      alert("Sessão expirada. Faça login novamente.");
+      handleLogout();
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/kpis`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify(kpiData),
+      });
+
+      if (res.status === 401) {
+        alert("Sessão expirada. Faça login novamente.");
+        handleLogout();
+        return;
+      }
+
+      if (!res.ok) {
+        alert("Erro ao criar KPI.");
+        return;
+      }
+
+      const created = await res.json();
+      setKpis((prev) => [...prev, created]);
+    } catch (err) {
+      console.error(err);
+      alert("Erro ao conectar com o servidor ao criar KPI.");
+    }
+  }
+
+  async function handleUpdateKpi(kpiId, updates) {
+    if (!authToken) {
+      alert("Sessão expirada. Faça login novamente.");
+      handleLogout();
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/kpis/${kpiId}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify(updates),
+      });
+
+      if (res.status === 401) {
+        alert("Sessão expirada. Faça login novamente.");
+        handleLogout();
+        return;
+      }
+
+      if (!res.ok) {
+        alert("Erro ao atualizar KPI.");
+        return;
+      }
+
+      const updated = await res.json();
+
+      setKpis((prev) => prev.map((k) => (k.id === kpiId ? updated : k)));
+    } catch (err) {
+      console.error(err);
+      alert("Erro ao conectar com o servidor ao atualizar KPI.");
+    }
+  }
+
+  async function handleDeleteKpi(kpiId) {
+    if (!authToken) {
+      alert("Sessão expirada. Faça login novamente.");
+      handleLogout();
+      return;
+    }
+
+    const kpi = kpis.find((k) => k.id === kpiId);
+    if (!kpi) return;
+
+    const confirmDelete = window.confirm(
+      `Excluir o KPI "${kpi.name}" e seus registros?`
+    );
+    if (!confirmDelete) return;
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/kpis/${kpiId}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+        },
+      });
+
+      if (res.status === 401) {
+        alert("Sessão expirada. Faça login novamente.");
+        handleLogout();
+        return;
+      }
+
+      if (!res.ok) {
+        alert("Erro ao excluir KPI.");
+        return;
+      }
+
+      setKpis((prev) => prev.filter((k) => k.id !== kpiId));
+
+      setProgress((prev) => {
+        const updated = {};
+        Object.keys(prev).forEach((key) => {
+          const [idStr] = key.split("-");
+          const idNum = Number(idStr);
+          if (idNum !== kpiId) {
+            updated[key] = prev[key];
+          }
+        });
+        return updated;
+      });
+    } catch (err) {
+      console.error(err);
+      alert("Erro ao conectar com o servidor ao excluir KPI.");
+    }
+  }
+
+  // --------- TELA DE LOGIN ---------
+
+  if (!currentUser || !authToken) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-100">
+        <div className="w-full max-w-md bg-white rounded-xl shadow-sm p-6">
+          <h1 className="text-2xl font-bold text-slate-900 mb-1">
+            Goal Tracker – Clínica
+          </h1>
+          <p className="text-sm text-slate-600 mb-2">
+            Acompanhe metas semanais e mensais da equipe.
+          </p>
+          {globalError && (
+            <p className="text-xs text-red-500 mb-2">{globalError}</p>
+          )}
+
+          {!showRecover ? (
+            <>
+              <form className="space-y-4" onSubmit={handleLogin}>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">
+                    E-mail
+                  </label>
+                  <input
+                    type="email"
+                    value={loginEmail}
+                    onChange={(e) => setLoginEmail(e.target.value)}
+                    className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                    placeholder="seuemail@clinica.com"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">
+                    Senha
+                  </label>
+                  <input
+                    type="password"
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                    placeholder="Sua senha"
+                  />
+                </div>
+
+                {loginError && (
+                  <p className="text-xs text-red-500">{loginError}</p>
+                )}
+
+                <button
+                  type="submit"
+                  className="w-full rounded-md bg-sky-600 py-2 text-sm font-semibold text-white hover:bg-sky-700 active:bg-sky-800"
+                >
+                  Entrar
+                </button>
+              </form>
+
+              <div className="mt-3 text-xs text-slate-600 text-right">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowRecover(true);
+                    setRecoverEmail("");
+                    setRecoverMessage("");
+                  }}
+                  className="text-sky-600 hover:underline"
+                >
+                  Esqueci minha senha
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <h2 className="text-sm font-semibold text-slate-900 mb-2">
+                Recuperar senha
+              </h2>
+              <p className="text-xs text-slate-600 mb-3">
+                Informe o e-mail cadastrado. Vamos simular o envio de um link de
+                redefinição de senha.
+              </p>
+              <form className="space-y-3" onSubmit={handleRecoverSubmit}>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">
+                    E-mail
+                  </label>
+                  <input
+                    type="email"
+                    value={recoverEmail}
+                    onChange={(e) => setRecoverEmail(e.target.value)}
+                    className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                    placeholder="seuemail@clinica.com"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="w-full rounded-md bg-sky-600 py-2 text-sm font-semibold text-white hover:bg-sky-700 active:bg-sky-800"
+                >
+                  Enviar link de recuperação
+                </button>
+              </form>
+              {recoverMessage && (
+                <p className="mt-3 text-xs text-slate-600">{recoverMessage}</p>
+              )}
+              <div className="mt-3 text-xs text-slate-600">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowRecover(false);
+                    setRecoverEmail("");
+                    setRecoverMessage("");
+                  }}
+                  className="text-sky-600 hover:underline"
+                >
+                  Voltar para login
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  const nonAdminUsers = users.filter((u) => u.role !== "admin");
+
+  return (
+    <div className="min-h-screen bg-slate-100">
+      <header className="bg-white border-b border-slate-200">
+        <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
+          <div>
+            <h1 className="text-lg font-semibold text-slate-900">
+              Goal Tracker – Clínica
+            </h1>
+            <p className="text-xs text-slate-500">
+              Usuário: {currentUser.name} (
+              {currentUser.role === "admin" ? "Admin" : currentUser.unit})
+            </p>
+          </div>
+          <button
+            onClick={handleLogout}
+            className="text-xs rounded-md border border-slate-300 px-3 py-1 text-slate-700 hover:bg-slate-50"
+          >
+            Sair
+          </button>
+        </div>
+      </header>
+
+      <main className="max-w-5xl mx-auto px-4 py-6">
+        {currentUser.role === "admin" ? (
+          <AdminDashboard
+            users={nonAdminUsers}
+            allUsers={users}
+            kpis={kpis}
+            progress={progress}
+            onCreateUser={handleCreateUser}
+            onDeleteUser={handleDeleteUser}
+            onCreateKpi={handleCreateKpi}
+            onUpdateKpi={handleUpdateKpi}
+            onDeleteKpi={handleDeleteKpi}
+            onImportData={handleImportData}
+            onExportData={handleExportData}
+          />
+        ) : (
+          <UserDashboard
+            currentUser={currentUser}
+            kpis={kpis}
+            progress={progress}
+            updateProgress={updateProgress}
+          />
+        )}
+      </main>
+    </div>
+  );
+}
+
+// ================== ADMIN ==================
+
+function AdminDashboard({
+  users,
+  allUsers,
+  kpis,
+  progress,
+  onCreateUser,
+  onDeleteUser,
+  onCreateKpi,
+  onUpdateKpi,
+  onDeleteKpi,
+  onImportData,
+  onExportData,
+}) {
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [unitType, setUnitType] = useState("unidades");
+  const [periodicity, setPeriodicity] = useState("semanal+mensal");
+  const [targetWeekly, setTargetWeekly] = useState("");
+  const [targetMonthly, setTargetMonthly] = useState("");
+  const [ownerId, setOwnerId] = useState(users[0]?.id || "");
+
+  const [userName, setUserName] = useState("");
+  const [userEmail, setUserEmail] = useState("");
+  const [userPassword, setUserPassword] = useState("");
+  const [userUnit, setUserUnit] = useState("");
+
+  // edição de KPI
+  const [editingKpiId, setEditingKpiId] = useState(null);
+  const [editName, setEditName] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [editUnitType, setEditUnitType] = useState("unidades");
+  const [editPeriodicity, setEditPeriodicity] = useState("semanal+mensal");
+  const [editTargetWeekly, setEditTargetWeekly] = useState("");
+  const [editTargetMonthly, setEditTargetMonthly] = useState("");
+  const [editOwnerId, setEditOwnerId] = useState("");
+
+  function isKpiDelivered(kpi) {
+    const weeklyStatus = getCurrentProgress(progress, kpi.id, "semanal");
+    const monthlyStatus = getCurrentProgress(progress, kpi.id, "mensal");
+
+    if (kpi.periodicity === "semanal") {
+      return weeklyStatus && weeklyStatus.delivered;
+    }
+    if (kpi.periodicity === "mensal") {
+      return monthlyStatus && monthlyStatus.delivered;
+    }
+    if (monthlyStatus && monthlyStatus.delivered) return true;
+    if (weeklyStatus && weeklyStatus.delivered) return true;
+    return false;
+  }
+
+  const adminUsers = allUsers.filter((u) => u.role === "user");
+
+  const kpiByUserData = adminUsers.map((u) => {
+    const userKpis = kpis.filter((k) => k.ownerId === u.id);
+    const total = userKpis.length;
+    let completed = 0;
+    userKpis.forEach((k) => {
+      if (isKpiDelivered(k)) completed++;
+    });
+    return {
+      name: u.name.split("–")[0].trim(),
+      Cumpridas: completed,
+      "Não cumpridas": Math.max(total - completed, 0),
+    };
+  });
+
+  const totalKpis = kpis.length;
+  let totalDelivered = 0;
+  kpis.forEach((k) => {
+    if (isKpiDelivered(k)) totalDelivered++;
+  });
+  const pendingKpis = Math.max(totalKpis - totalDelivered, 0);
+  const clinicCompletionRate =
+    totalKpis === 0 ? 0 : Math.round((totalDelivered / totalKpis) * 100);
+
+  const totalUsers = adminUsers.length;
+
+  const adminOverallPie =
+    totalKpis === 0
+      ? []
+      : [
+          { name: "Cumpridas", value: totalDelivered },
+          { name: "Pendentes", value: pendingKpis },
+        ];
+
+  const rankingData = adminUsers
+    .map((u) => {
+      const userKpis = kpis.filter((k) => k.ownerId === u.id);
+      const total = userKpis.length;
+
+      if (total === 0) {
+        return { user: u, total: 0, completed: 0, averagePercent: 0 };
+      }
+
+      let completed = 0;
+      let sumPercent = 0;
+      let countWithData = 0;
+
+      userKpis.forEach((k) => {
+        const perf = getKpiPerformance(k, progress);
+
+        if (perf.level !== "neutro") {
+          sumPercent += perf.percent;
+          countWithData++;
+
+          if (perf.percent >= 100) {
+            completed++;
+          }
+        }
+      });
+
+      const averagePercent =
+        countWithData === 0 ? 0 : Math.round(sumPercent / countWithData);
+
+      return {
+        user: u,
+        total,
+        completed,
+        averagePercent,
+      };
+    })
+    .sort((a, b) => b.averagePercent - a.averagePercent);
+
+  function handleCreateKpiSubmit(e) {
+    e.preventDefault();
+    if (!name.trim() || !ownerId) return;
+
+    const kpiData = {
+      name: name.trim(),
+      description: description.trim(),
+      unitType,
+      periodicity,
+      targetWeekly:
+        periodicity === "semanal" || periodicity === "semanal+mensal"
+          ? Number(targetWeekly || 0)
+          : undefined,
+      targetMonthly:
+        periodicity === "mensal" || periodicity === "semanal+mensal"
+          ? Number(targetMonthly || 0)
+          : undefined,
+      ownerId: Number(ownerId),
+    };
+
+    onCreateKpi(kpiData);
+
+    setName("");
+    setDescription("");
+    setUnitType("unidades");
+    setPeriodicity("semanal+mensal");
+    setTargetWeekly("");
+    setTargetMonthly("");
+    setOwnerId(users[0]?.id || "");
+  }
+
+  function handleCreateUserSubmit(e) {
+    e.preventDefault();
+    if (!userName.trim() || !userEmail.trim() || !userPassword.trim()) return;
+
+    onCreateUser({
+      name: userName,
+      email: userEmail,
+      password: userPassword,
+      unit: userUnit || "Clínica",
+    });
+
+    setUserName("");
+    setUserEmail("");
+    setUserPassword("");
+    setUserUnit("");
+  }
+
+  function formatUnit(unitType) {
+    if (unitType === "unidades") return "unid.";
+    if (unitType === "percentual") return "%";
+    if (unitType === "valor") return "R$";
+    return "";
+  }
+
+  function getOwnerName(id) {
+    const u = allUsers.find((user) => user.id === id);
+    return u ? u.name : "Desconhecido";
+  }
+
+  function getProgressLabel(kpiId, periodType) {
+    const status = getCurrentProgress(progress, kpiId, periodType);
+    if (!status) return "Sem registro ainda";
+
+    if (status.delivered) {
+      let text = status.value ? `Entregue (${status.value})` : "Entregue";
+      if (status.comment) {
+        text += ` – ${status.comment}`;
+      }
+      return text;
+    }
+    return status.comment ? `Não entregue (${status.comment})` : "Não entregue";
+  }
+
+  function renderPerfBadge(kpi) {
+    const perf = getKpiPerformance(kpi, progress);
+
+    if (perf.level === "neutro") {
+      return (
+        <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-medium text-slate-500">
+          Status: sem registro no período
+        </span>
+      );
+    }
+
+    const classes =
+      perf.level === "verde"
+        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+        : perf.level === "amarelo"
+        ? "border-amber-200 bg-amber-50 text-amber-700"
+        : "border-red-200 bg-red-50 text-red-700";
+
+    const label =
+      perf.level === "verde"
+        ? "Verde"
+        : perf.level === "amarelo"
+        ? "Amarelo"
+        : "Vermelho";
+
+    const baseText =
+      perf.base === "mensal"
+        ? "mês atual"
+        : perf.base === "semanal"
+        ? "semana atual"
+        : "período atual";
+
+    return (
+      <span
+        className={
+          "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium " +
+          classes
+        }
+      >
+        {label} · {perf.percent}% ({baseText})
+      </span>
+    );
+  }
+
+  function handleImportFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const confirmImport = window.confirm(
+      "Isso vai substituir TODOS os usuários, KPIs e registros atuais pelos dados do arquivo. Continuar?"
+    );
+    if (!confirmImport) {
+      e.target.value = "";
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const text = event.target.result;
+        const data = JSON.parse(text);
+        onImportData(data);
+      } catch (err) {
+        console.error(err);
+        alert("Erro ao ler o arquivo de backup.");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  }
+
+  function startEditKpi(kpi) {
+    setEditingKpiId(kpi.id);
+    setEditName(kpi.name);
+    setEditDescription(kpi.description || "");
+    setEditUnitType(kpi.unitType);
+    setEditPeriodicity(kpi.periodicity);
+    setEditTargetWeekly(
+      kpi.targetWeekly != null ? String(kpi.targetWeekly) : ""
+    );
+    setEditTargetMonthly(
+      kpi.targetMonthly != null ? String(kpi.targetMonthly) : ""
+    );
+    setEditOwnerId(String(kpi.ownerId));
+  }
+
+  function cancelEditKpi() {
+    setEditingKpiId(null);
+    setEditName("");
+    setEditDescription("");
+    setEditUnitType("unidades");
+    setEditPeriodicity("semanal+mensal");
+    setEditTargetWeekly("");
+    setEditTargetMonthly("");
+    setEditOwnerId("");
+  }
+
+  function handleUpdateKpiSubmit(e) {
+    e.preventDefault();
+    if (!editingKpiId || !editName.trim() || !editOwnerId) return;
+
+    const updates = {
+      name: editName.trim(),
+      description: editDescription.trim(),
+      unitType: editUnitType,
+      periodicity: editPeriodicity,
+      targetWeekly:
+        editPeriodicity === "semanal" || editPeriodicity === "semanal+mensal"
+          ? Number(editTargetWeekly || 0)
+          : undefined,
+      targetMonthly:
+        editPeriodicity === "mensal" || editPeriodicity === "semanal+mensal"
+          ? Number(editTargetMonthly || 0)
+          : undefined,
+      ownerId: Number(editOwnerId),
+    };
+
+    onUpdateKpi(editingKpiId, updates);
+    cancelEditKpi();
+  }
+
+  return (
+    <div className="space-y-8">
+      {/* DASHBOARD GERAL + BACKUP */}
+      <section>
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <h2 className="text-lg font-semibold text-slate-900">
+            Dashboard geral
+          </h2>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={onExportData}
+              className="text-xs rounded-md border border-slate-300 px-3 py-1 text-slate-700 hover:bg-slate-50"
+            >
+              Exportar dados
+            </button>
+            <label className="text-xs rounded-md border border-slate-300 px-3 py-1 text-slate-700 hover:bg-slate-50 cursor-pointer">
+              Importar dados
+              <input
+                type="file"
+                accept="application/json"
+                className="hidden"
+                onChange={handleImportFile}
+              />
+            </label>
+          </div>
+        </div>
+
+        {/* Cards de resumo */}
+        <div className="grid gap-3 md:grid-cols-4 mb-4">
+          <div className="bg-white rounded-xl shadow-sm p-3 border border-slate-200">
+            <div className="text-[11px] text-slate-500">KPIs cadastrados</div>
+            <div className="text-xl font-semibold text-slate-900">
+              {totalKpis}
+            </div>
+          </div>
+          <div className="bg-white rounded-xl shadow-sm p-3 border border-slate-200">
+            <div className="text-[11px] text-slate-500">Metas cumpridas</div>
+            <div className="text-xl font-semibold text-emerald-700">
+              {totalDelivered}
+            </div>
+          </div>
+          <div className="bg-white rounded-xl shadow-sm p-3 border border-slate-200">
+            <div className="text-[11px] text-slate-500">
+              % da clínica no verde
+            </div>
+            <div className="text-xl font-semibold text-slate-900">
+              {clinicCompletionRate}%
+            </div>
+          </div>
+          <div className="bg-white rounded-xl shadow-sm p-3 border border-slate-200">
+            <div className="text-[11px] text-slate-500">
+              Responsáveis ativos
+            </div>
+            <div className="text-xl font-semibold text-slate-900">
+              {totalUsers}
+            </div>
+          </div>
+        </div>
+
+        {kpis.length === 0 ? (
+          <p className="text-sm text-slate-500">
+            Cadastre alguns KPIs para ver os gráficos.
+          </p>
+        ) : (
+          <div className="grid gap-4 lg:grid-cols-3">
+            <div className="bg-white rounded-xl shadow-sm p-4 border border-slate-200 lg:col-span-2">
+              <h3 className="text-sm font-semibold text-slate-800 mb-2">
+                Metas por responsável
+              </h3>
+              <div className="h-56">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={kpiByUserData}>
+                    <XAxis dataKey="name" fontSize={10} />
+                    <YAxis allowDecimals={false} />
+                    <Tooltip />
+                    <Legend />
+                    <Bar dataKey="Cumpridas" />
+                    <Bar dataKey="Não cumpridas" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <div className="bg-white rounded-xl shadow-sm p-4 border border-slate-200">
+                <h3 className="text-sm font-semibold text-slate-800 mb-2">
+                  Status geral das metas
+                </h3>
+                {adminOverallPie.length === 0 ? (
+                  <p className="text-xs text-slate-500">
+                    Sem dados de acompanhamento ainda.
+                  </p>
+                ) : (
+                  <div className="h-40">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie
+                          data={adminOverallPie}
+                          dataKey="value"
+                          nameKey="name"
+                          cx="50%"
+                          cy="50%"
+                          outerRadius={60}
+                          label
+                        />
+                        <Tooltip />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-white rounded-xl shadow-sm p-4 border border-slate-200">
+                <h3 className="text-sm font-semibold text-slate-800 mb-2">
+                  Ranking de responsáveis
+                </h3>
+                {rankingData.length === 0 ? (
+                  <p className="text-xs text-slate-500">
+                    Nenhum responsável com KPIs atribuídos.
+                  </p>
+                ) : (
+                  <ul className="space-y-2 text-xs">
+                    {rankingData.slice(0, 5).map((item, index) => (
+                      <li
+                        key={item.user.id}
+                        className="flex items-center justify-between border border-slate-200 rounded-md px-2 py-1.5"
+                      >
+                        <div>
+                          <div className="font-medium text-slate-900">
+                            {index + 1}. {item.user.name}
+                          </div>
+                          <div className="text-[11px] text-slate-500">
+                            {item.total === 0
+                              ? "Nenhum KPI atribuído"
+                              : `${item.completed}/${item.total} KPIs ≥ 100%`}
+                          </div>
+                        </div>
+                        <span className="text-xs font-semibold text-slate-800">
+                          {item.total === 0 ? "–" : `${item.averagePercent}%`}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* Gestão de usuários */}
+      <section>
+        <h2 className="text-lg font-semibold text-slate-900 mb-3">
+          Responsáveis (usuários)
+        </h2>
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="bg-white rounded-xl shadow-sm p-4 border border-slate-200">
+            <h3 className="text-sm font-semibold text-slate-800 mb-3">
+              Cadastrar novo responsável
+            </h3>
+            <form className="space-y-3" onSubmit={handleCreateUserSubmit}>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">
+                  Nome
+                </label>
+                <input
+                  type="text"
+                  value={userName}
+                  onChange={(e) => setUserName(e.target.value)}
+                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                  placeholder="Ex.: Marcia, Michelle..."
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">
+                  E-mail
+                </label>
+                <input
+                  type="email"
+                  value={userEmail}
+                  onChange={(e) => setUserEmail(e.target.value)}
+                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                  placeholder="responsavel@clinica.com"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">
+                  Senha
+                </label>
+                <input
+                  type="password"
+                  value={userPassword}
+                  onChange={(e) => setUserPassword(e.target.value)}
+                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                  placeholder="Senha inicial"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">
+                  Unidade / área
+                </label>
+                <input
+                  type="text"
+                  value={userUnit}
+                  onChange={(e) => setUserUnit(e.target.value)}
+                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                  placeholder="Adm Técnica, Recepção..."
+                />
+              </div>
+              <button
+                type="submit"
+                className="mt-1 rounded-md bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700 active:bg-sky-800"
+              >
+                Criar responsável
+              </button>
+            </form>
+          </div>
+
+          <div className="bg-white rounded-xl shadow-sm p-4 border border-slate-200">
+            <h3 className="text-sm font-semibold text-slate-800 mb-3">
+              Lista de responsáveis
+            </h3>
+            {users.length === 0 ? (
+              <p className="text-sm text-slate-500">
+                Nenhum responsável cadastrado ainda.
+              </p>
+            ) : (
+              <ul className="space-y-2 text-sm">
+                {users.map((u) => (
+                  <li
+                    key={u.id}
+                    className="flex items-center justify-between border border-slate-200 rounded-md px-3 py-2"
+                  >
+                    <div>
+                      <div className="font-medium text-slate-900">
+                        {u.name}
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        {u.email} • {u.unit}
+                      </div>
+                    </div>
+                    {u.role !== "admin" && (
+                      <button
+                        onClick={() => onDeleteUser(u.id)}
+                        className="text-xs text-red-500 hover:text-red-600"
+                      >
+                        Excluir
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* Criação e lista de KPIs */}
+      <section>
+        <h2 className="text-lg font-semibold text-slate-900 mb-3">
+          Administração – KPIs
+        </h2>
+        <div className="bg-white rounded-xl shadow-sm p-4 border border-slate-200 mb-4">
+          <h3 className="text-sm font-semibold text-slate-800 mb-3">
+            Criar novo KPI
+          </h3>
+          <form className="space-y-3" onSubmit={handleCreateKpiSubmit}>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-medium text-slate-600 mb-1">
+                  Nome do KPI
+                </label>
+                <input
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                  placeholder="Ex.: Vídeos nas redes sociais"
+                />
+              </div>
+
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-medium text-slate-600 mb-1">
+                  Descrição
+                </label>
+                <textarea
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                  rows={2}
+                  placeholder="Detalhe como a meta deve ser cumprida."
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">
+                  Tipo de unidade
+                </label>
+                <select
+                  value={unitType}
+                  onChange={(e) => setUnitType(e.target.value)}
+                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                >
+                  <option value="unidades">Unidades</option>
+                  <option value="percentual">Percentual (%)</option>
+                  <option value="valor">Valor (R$)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">
+                  Periodicidade
+                </label>
+                <select
+                  value={periodicity}
+                  onChange={(e) => setPeriodicity(e.target.value)}
+                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                >
+                  <option value="semanal">Semanal</option>
+                  <option value="mensal">Mensal</option>
+                  <option value="semanal+mensal">Semanal + Mensal</option>
+                </select>
+              </div>
+
+              {(periodicity === "semanal" ||
+                periodicity === "semanal+mensal") && (
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">
+                    Meta semanal
+                  </label>
+                  <input
+                    type="number"
+                    value={targetWeekly}
+                    onChange={(e) => setTargetWeekly(e.target.value)}
+                    className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                    placeholder="Ex.: 2"
+                  />
+                </div>
+              )}
+
+              {(periodicity === "mensal" ||
+                periodicity === "semanal+mensal") && (
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">
+                    Meta mensal
+                  </label>
+                  <input
+                    type="number"
+                    value={targetMonthly}
+                    onChange={(e) => setTargetMonthly(e.target.value)}
+                    className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                    placeholder="Ex.: 8"
+                  />
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">
+                  Responsável
+                </label>
+                <select
+                  value={ownerId}
+                  onChange={(e) => setOwnerId(e.target.value)}
+                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                >
+                  <option value="">Selecione</option>
+                  {users.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.name} ({u.unit})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="pt-2">
+              <button
+                type="submit"
+                className="rounded-md bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700 active:bg-sky-800"
+              >
+                Criar KPI
+              </button>
+            </div>
+          </form>
+        </div>
+
+        {/* Lista de KPIs */}
+        <div>
+          <h3 className="text-sm font-semibold text-slate-800 mb-3">
+            KPIs cadastrados
+          </h3>
+          {kpis.length === 0 ? (
+            <p className="text-sm text-slate-500">
+              Nenhum KPI cadastrado ainda.
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {kpis.map((kpi) => (
+                <div
+                  key={kpi.id}
+                  className="bg-white rounded-xl shadow-sm p-4 border border-slate-200"
+                >
+                  <div className="flex justify-between gap-4">
+                    <div>
+                      <h4 className="text-sm font-semibold text-slate-900">
+                        {kpi.name}
+                      </h4>
+                      <p className="text-xs text-slate-600 mt-1">
+                        {kpi.description}
+                      </p>
+                      <p className="text-xs text-slate-500 mt-1">
+                        Responsável: {getOwnerName(kpi.ownerId)}
+                      </p>
+                      <p className="text-[11px] text-slate-500 mt-1">
+                        Unidade: {formatUnit(kpi.unitType)} | Periodicidade:{" "}
+                        {kpi.periodicity}
+                        {kpi.targetWeekly != null &&
+                          ` | Meta semanal: ${kpi.targetWeekly} ${formatUnit(
+                            kpi.unitType
+                          )}`}
+                        {kpi.targetMonthly != null &&
+                          ` | Meta mensal: ${kpi.targetMonthly} ${formatUnit(
+                            kpi.unitType
+                          )}`}
+                      </p>
+                      <div className="mt-2">{renderPerfBadge(kpi)}</div>
+                    </div>
+                    <div className="flex flex-col gap-1 self-start">
+                      <button
+                        onClick={() => startEditKpi(kpi)}
+                        className="text-xs text-sky-600 hover:text-sky-700"
+                      >
+                        Editar
+                      </button>
+                      <button
+                        onClick={() => onDeleteKpi(kpi.id)}
+                        className="text-xs text-red-500 hover:text-red-600"
+                      >
+                        Excluir
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2 text-[11px] text-slate-600">
+                    {(kpi.periodicity === "semanal" ||
+                      kpi.periodicity === "semanal+mensal") && (
+                      <div>
+                        <div className="font-semibold mb-1">
+                          Semana atual – status:
+                        </div>
+                        <div>{getProgressLabel(kpi.id, "semanal")}</div>
+                      </div>
+                    )}
+                    {(kpi.periodicity === "mensal" ||
+                      kpi.periodicity === "semanal+mensal") && (
+                      <div>
+                        <div className="font-semibold mb-1">
+                          Mês atual – status:
+                        </div>
+                        <div>{getProgressLabel(kpi.id, "mensal")}</div>
+                      </div>
+                    )}
+                  </div>
+
+                  <HistoryBlock kpi={kpi} progress={progress} />
+
+                  {editingKpiId === kpi.id && (
+                    <div className="mt-3 border-t border-slate-100 pt-3">
+                      <h4 className="text-xs font-semibold text-slate-800 mb-2">
+                        Editar KPI
+                      </h4>
+                      <form
+                        className="space-y-2 text-xs"
+                        onSubmit={handleUpdateKpiSubmit}
+                      >
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <div className="sm:col-span-2">
+                            <label className="block text-[11px] text-slate-600 mb-1">
+                              Nome
+                            </label>
+                            <input
+                              type="text"
+                              value={editName}
+                              onChange={(e) => setEditName(e.target.value)}
+                              className="w-full rounded-md border border-slate-300 px-2 py-1 text-xs outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                            />
+                          </div>
+                          <div className="sm:col-span-2">
+                            <label className="block text-[11px] text-slate-600 mb-1">
+                              Descrição
+                            </label>
+                            <textarea
+                              value={editDescription}
+                              onChange={(e) =>
+                                setEditDescription(e.target.value)
+                              }
+                              rows={2}
+                              className="w-full rounded-md border border-slate-300 px-2 py-1 text-xs outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] text-slate-600 mb-1">
+                              Tipo de unidade
+                            </label>
+                            <select
+                              value={editUnitType}
+                              onChange={(e) => setEditUnitType(e.target.value)}
+                              className="w-full rounded-md border border-slate-300 px-2 py-1 text-xs outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                            >
+                              <option value="unidades">Unidades</option>
+                              <option value="percentual">Percentual (%)</option>
+                              <option value="valor">Valor (R$)</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-[11px] text-slate-600 mb-1">
+                              Periodicidade
+                            </label>
+                            <select
+                              value={editPeriodicity}
+                              onChange={(e) =>
+                                setEditPeriodicity(e.target.value)
+                              }
+                              className="w-full rounded-md border border-slate-300 px-2 py-1 text-xs outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                            >
+                              <option value="semanal">Semanal</option>
+                              <option value="mensal">Mensal</option>
+                              <option value="semanal+mensal">
+                                Semanal + Mensal
+                              </option>
+                            </select>
+                          </div>
+                          {(editPeriodicity === "semanal" ||
+                            editPeriodicity === "semanal+mensal") && (
+                            <div>
+                              <label className="block text-[11px] text-slate-600 mb-1">
+                                Meta semanal
+                              </label>
+                              <input
+                                type="number"
+                                value={editTargetWeekly}
+                                onChange={(e) =>
+                                  setEditTargetWeekly(e.target.value)
+                                }
+                                className="w-full rounded-md border border-slate-300 px-2 py-1 text-xs outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                              />
+                            </div>
+                          )}
+                          {(editPeriodicity === "mensal" ||
+                            editPeriodicity === "semanal+mensal") && (
+                            <div>
+                              <label className="block text-[11px] text-slate-600 mb-1">
+                                Meta mensal
+                              </label>
+                              <input
+                                type="number"
+                                value={editTargetMonthly}
+                                onChange={(e) =>
+                                  setEditTargetMonthly(e.target.value)
+                                }
+                                className="w-full rounded-md border border-slate-300 px-2 py-1 text-xs outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                              />
+                            </div>
+                          )}
+                          <div>
+                            <label className="block text-[11px] text-slate-600 mb-1">
+                              Responsável
+                            </label>
+                            <select
+                              value={editOwnerId}
+                              onChange={(e) => setEditOwnerId(e.target.value)}
+                              className="w-full rounded-md border border-slate-300 px-2 py-1 text-xs outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                            >
+                              <option value="">Selecione</option>
+                              {users.map((u) => (
+                                <option key={u.id} value={u.id}>
+                                  {u.name} ({u.unit})
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+
+                        <div className="flex gap-2 pt-1">
+                          <button
+                            type="submit"
+                            className="rounded-md bg-emerald-600 px-3 py-1 text-[11px] font-semibold text-white hover:bg-emerald-700 active:bg-emerald-800"
+                          >
+                            Salvar alterações
+                          </button>
+                          <button
+                            type="button"
+                            onClick={cancelEditKpi}
+                            className="rounded-md border border-slate-300 px-3 py-1 text-[11px] text-slate-700 hover:bg-slate-50"
+                          >
+                            Cancelar
+                          </button>
+                        </div>
+                      </form>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+// Histórico (admin, por KPI)
+
+function HistoryBlock({ kpi, progress }) {
+  const weeklyHistory =
+    kpi.periodicity === "semanal" || kpi.periodicity === "semanal+mensal"
+      ? getKpiHistory(kpi, "semanal", progress, 4)
+      : [];
+  const monthlyHistory =
+    kpi.periodicity === "mensal" || kpi.periodicity === "semanal+mensal"
+      ? getKpiHistory(kpi, "mensal", progress, 6)
+      : [];
+
+  if (weeklyHistory.length === 0 && monthlyHistory.length === 0) {
+    return (
+      <div className="mt-3 border-t border-slate-100 pt-2">
+        <p className="text-[11px] text-slate-500">
+          Sem histórico ainda para este KPI.
+        </p>
+      </div>
+    );
+  }
+
+  const renderItem = (item) => {
+    const colorClass =
+      item.level === "verde"
+        ? "text-emerald-700"
+        : item.level === "amarelo"
+        ? "text-amber-700"
+        : "text-red-700";
+
+    let statusText;
+    if (item.status.delivered) {
+      statusText = item.status.value
+        ? `Entregue (${item.status.value})`
+        : "Entregue";
+      if (item.status.comment) {
+        statusText += ` – ${item.status.comment}`;
+      }
+    } else {
+      statusText = item.status.comment
+        ? `Não entregue (${item.status.comment})`
+        : "Não entregue";
+    }
+
+    return (
+      <li key={item.periodKey} className="flex justify-between gap-2">
+        <span className="text-slate-500">{item.label}</span>
+        <span className={colorClass}>
+          {item.percent}% · {statusText}
+        </span>
+      </li>
+    );
+  };
+
+  return (
+    <div className="mt-3 border-t border-slate-100 pt-2 text-[11px]">
+      {weeklyHistory.length > 0 && (
+        <div className="mb-2">
+          <div className="font-semibold text-slate-700 mb-1">
+            Histórico semanal (últimas {weeklyHistory.length} semanas)
+          </div>
+          <ul className="space-y-0.5">{weeklyHistory.map(renderItem)}</ul>
+        </div>
+      )}
+      {monthlyHistory.length > 0 && (
+        <div>
+          <div className="font-semibold text-slate-700 mb-1">
+            Histórico mensal (últimos {monthlyHistory.length} meses)
+          </div>
+          <ul className="space-y-0.5">{monthlyHistory.map(renderItem)}</ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ================== USER ==================
+
+function UserDashboard({ currentUser, kpis, progress, updateProgress }) {
+  const myKpis = kpis.filter((k) => k.ownerId === currentUser.id);
+
+  const chartData = myKpis.map((kpi) => {
+    const weeklyStatus = getCurrentProgress(progress, kpi.id, "semanal");
+    const monthlyStatus = getCurrentProgress(progress, kpi.id, "mensal");
+
+    let semanal = 0;
+    let mensal = 0;
+
+    if (
+      (kpi.periodicity === "semanal" ||
+        kpi.periodicity === "semanal+mensal") &&
+      weeklyStatus &&
+      weeklyStatus.delivered
+    ) {
+      const delivered = parseFloat(weeklyStatus.value || "0");
+      if (kpi.targetWeekly && kpi.targetWeekly > 0 && !isNaN(delivered)) {
+        semanal = Math.round((delivered / kpi.targetWeekly) * 100);
+      } else {
+        semanal = 100;
+      }
+    }
+
+    if (
+      (kpi.periodicity === "mensal" ||
+        kpi.periodicity === "semanal+mensal") &&
+      monthlyStatus &&
+      monthlyStatus.delivered
+    ) {
+      const delivered = parseFloat(monthlyStatus.value || "0");
+      if (kpi.targetMonthly && kpi.targetMonthly > 0 && !isNaN(delivered)) {
+        mensal = Math.round((delivered / kpi.targetMonthly) * 100);
+      } else {
+        mensal = 100;
+      }
+    }
+
+    return {
+      name: kpi.name.split("–")[0].trim(),
+      Semanal: semanal,
+      Mensal: mensal,
+    };
+  });
+
+  return (
+    <div className="space-y-6">
+      {myKpis.length > 0 && (
+        <section>
+          <h2 className="text-lg font-semibold text-slate-900 mb-2">
+            Dashboard das minhas metas
+          </h2>
+          <div className="bg-white rounded-xl shadow-sm p-4 border border-slate-200">
+            <p className="text-xs text-slate-600 mb-2">
+              Cada barra mostra o % da meta semanal / mensal atingida no período
+              atual. Se passar de 100%, significa que você superou a meta.
+            </p>
+            <div className="h-56">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={chartData}>
+                  <XAxis dataKey="name" fontSize={10} />
+                  <YAxis
+                    domain={[0, "dataMax + 20"]}
+                    tickFormatter={(v) => `${v}%`}
+                  />
+                  <Tooltip formatter={(v) => `${v}%`} />
+                  <Legend />
+                  <Bar dataKey="Semanal" />
+                  <Bar dataKey="Mensal" />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        </section>
+      )}
+
+      <section>
+        <h2 className="text-lg font-semibold text-slate-900 mb-2">
+          Minhas metas
+        </h2>
+        <p className="text-sm text-slate-600 mb-4">
+          Registre se você está cumprindo as metas semanais e mensais da
+          clínica.
+        </p>
+
+        {myKpis.length === 0 ? (
+          <p className="text-sm text-slate-500">
+            Nenhum KPI atribuído a você ainda.
+          </p>
+        ) : (
+          <div className="space-y-4">
+            {myKpis.map((kpi) => (
+              <KpiCard
+                key={kpi.id}
+                kpi={kpi}
+                progress={progress}
+                updateProgress={updateProgress}
+              />
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function KpiCard({ kpi, progress, updateProgress }) {
+  const [weeklyDelivered, setWeeklyDelivered] = useState("sim");
+  const [weeklyValue, setWeeklyValue] = useState("");
+  const [weeklyComment, setWeeklyComment] = useState("");
+
+  const [monthlyDelivered, setMonthlyDelivered] = useState("sim");
+  const [monthlyValue, setMonthlyValue] = useState("");
+  const [monthlyComment, setMonthlyComment] = useState("");
+
+  const weeklyStatus = getCurrentProgress(progress, kpi.id, "semanal");
+  const monthlyStatus = getCurrentProgress(progress, kpi.id, "mensal");
+
+  const perf = getKpiPerformance(kpi, progress);
+
+  function formatUnit(unitType) {
+    if (unitType === "unidades") return "unid.";
+    if (unitType === "percentual") return "%";
+    if (unitType === "valor") return "R$";
+    return "";
+  }
+
+  function submitWeekly(e) {
+    e.preventDefault();
+    const delivered = weeklyDelivered === "sim";
+
+    if (delivered) {
+      const target = kpi.targetWeekly;
+      const deliveredNum = parseFloat(weeklyValue);
+
+      if (
+        target &&
+        target > 0 &&
+        !isNaN(deliveredNum) &&
+        deliveredNum < target &&
+        !weeklyComment.trim()
+      ) {
+        alert(
+          "Justificativa obrigatória quando o valor entregue é menor que a meta semanal."
+        );
+        return;
+      }
+    }
+
+    updateProgress(
+      kpi.id,
+      "semanal",
+      delivered,
+      delivered ? weeklyValue : "",
+      weeklyComment
+    );
+
+    setWeeklyValue("");
+    setWeeklyComment("");
+  }
+
+  function submitMonthly(e) {
+    e.preventDefault();
+    const delivered = monthlyDelivered === "sim";
+
+    if (delivered) {
+      const target = kpi.targetMonthly;
+      const deliveredNum = parseFloat(monthlyValue);
+
+      if (
+        target &&
+        target > 0 &&
+        !isNaN(deliveredNum) &&
+        deliveredNum < target &&
+        !monthlyComment.trim()
+      ) {
+        alert(
+          "Justificativa obrigatória quando o valor entregue é menor que a meta mensal."
+        );
+        return;
+      }
+    }
+
+    updateProgress(
+      kpi.id,
+      "mensal",
+      delivered,
+      delivered ? monthlyValue : "",
+      monthlyComment
+    );
+
+    setMonthlyValue("");
+    setMonthlyComment("");
+  }
+
+  function renderPerfBadge() {
+    if (perf.level === "neutro") {
+      return (
+        <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-medium text-slate-500">
+          Status: sem registro no período
+        </span>
+      );
+    }
+
+    const classes =
+      perf.level === "verde"
+        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+        : perf.level === "amarelo"
+        ? "border-amber-200 bg-amber-50 text-amber-700"
+        : "border-red-200 bg-red-50 text-red-700";
+
+    const label =
+      perf.level === "verde"
+        ? "Verde"
+        : perf.level === "amarelo"
+        ? "Amarelo"
+        : "Vermelho";
+
+    const baseText =
+      perf.base === "mensal"
+        ? "mês atual"
+        : perf.base === "semanal"
+        ? "semana atual"
+        : "período atual";
+
+    return (
+      <span
+        className={
+          "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium " +
+          classes
+        }
+      >
+        {label} · {perf.percent}% ({baseText})
+      </span>
+    );
+  }
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm p-4 border border-slate-200">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-900">{kpi.name}</h3>
+          <p className="text-xs text-slate-600 mt-1">{kpi.description}</p>
+          <p className="text-[11px] text-slate-500 mt-1">
+            Unidade: {formatUnit(kpi.unitType)}
+            {kpi.targetWeekly != null &&
+              ` | Meta semanal: ${kpi.targetWeekly} ${formatUnit(
+                kpi.unitType
+              )}`}
+            {kpi.targetMonthly != null &&
+              ` | Meta mensal: ${kpi.targetMonthly} ${formatUnit(
+                kpi.unitType
+              )}`}
+          </p>
+        </div>
+        <div className="ml-2">{renderPerfBadge()}</div>
+      </div>
+
+      <div className="mt-4 grid gap-4 md:grid-cols-2">
+        {(kpi.periodicity === "semanal" ||
+          kpi.periodicity === "semanal+mensal") && (
+          <div className="border border-slate-200 rounded-lg p-3">
+            <div className="text-xs font-semibold text-slate-800 mb-1">
+              Semana atual
+            </div>
+            {weeklyStatus && (
+              <p className="text-[11px] text-slate-500 mb-2">
+                Último registro:{" "}
+                {(() => {
+                  if (weeklyStatus.delivered) {
+                    let text = weeklyStatus.value
+                      ? `Meta entregue (${weeklyStatus.value})`
+                      : "Meta entregue";
+                    if (weeklyStatus.comment) {
+                      text += ` – ${weeklyStatus.comment}`;
+                    }
+                    return text;
+                  }
+                  return weeklyStatus.comment
+                    ? `Meta não entregue (${weeklyStatus.comment})`
+                    : "Meta não entregue";
+                })()}
+              </p>
+            )}
+            <form className="space-y-2" onSubmit={submitWeekly}>
+              <div className="flex gap-2 text-[11px]">
+                <label className="flex items-center gap-1">
+                  <input
+                    type="radio"
+                    value="sim"
+                    checked={weeklyDelivered === "sim"}
+                    onChange={(e) => setWeeklyDelivered(e.target.value)}
+                  />
+                  Entregue
+                </label>
+                <label className="flex items-center gap-1">
+                  <input
+                    type="radio"
+                    value="nao"
+                    checked={weeklyDelivered === "nao"}
+                    onChange={(e) => setWeeklyDelivered(e.target.value)}
+                  />
+                  Não entregue
+                </label>
+              </div>
+
+              {weeklyDelivered === "sim" && (
+                <>
+                  <input
+                    type="text"
+                    value={weeklyValue}
+                    onChange={(e) => setWeeklyValue(e.target.value)}
+                    placeholder={`Valor entregue (ex.: 2 ${formatUnit(
+                      kpi.unitType
+                    )})`}
+                    className="w-full rounded-md border border-slate-300 px-2 py-1 text-[11px] outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                  />
+                  <textarea
+                    value={weeklyComment}
+                    onChange={(e) => setWeeklyComment(e.target.value)}
+                    placeholder="Comentário (use se entregou abaixo da meta, teve atraso, etc.)"
+                    rows={2}
+                    className="w-full rounded-md border border-slate-300 px-2 py-1 text-[11px] outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                  />
+                </>
+              )}
+
+              {weeklyDelivered === "nao" && (
+                <textarea
+                  value={weeklyComment}
+                  onChange={(e) => setWeeklyComment(e.target.value)}
+                  placeholder="Motivo da não entrega"
+                  rows={2}
+                  className="w-full rounded-md border border-slate-300 px-2 py-1 text-[11px] outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                />
+              )}
+
+              <button
+                type="submit"
+                className="mt-1 w-full rounded-md bg-emerald-600 py-1 text-[11px] font-semibold text-white hover:bg-emerald-700 active:bg-emerald-800"
+              >
+                Registrar semana
+              </button>
+            </form>
+          </div>
+        )}
+
+        {(kpi.periodicity === "mensal" ||
+          kpi.periodicity === "semanal+mensal") && (
+          <div className="border border-slate-200 rounded-lg p-3">
+            <div className="text-xs font-semibold text-slate-800 mb-1">
+              Mês atual
+            </div>
+            {monthlyStatus && (
+              <p className="text-[11px] text-slate-500 mb-2">
+                Último registro:{" "}
+                {(() => {
+                  if (monthlyStatus.delivered) {
+                    let text = monthlyStatus.value
+                      ? `Meta entregue (${monthlyStatus.value})`
+                      : "Meta entregue";
+                    if (monthlyStatus.comment) {
+                      text += ` – ${monthlyStatus.comment}`;
+                    }
+                    return text;
+                  }
+                  return monthlyStatus.comment
+                    ? `Meta não entregue (${monthlyStatus.comment})`
+                    : "Meta não entregue";
+                })()}
+              </p>
+            )}
+            <form className="space-y-2" onSubmit={submitMonthly}>
+              <div className="flex gap-2 text-[11px]">
+                <label className="flex items-center gap-1">
+                  <input
+                    type="radio"
+                    value="sim"
+                    checked={monthlyDelivered === "sim"}
+                    onChange={(e) => setMonthlyDelivered(e.target.value)}
+                  />
+                  Entregue
+                </label>
+                <label className="flex items-center gap-1">
+                  <input
+                    type="radio"
+                    value="nao"
+                    checked={monthlyDelivered === "nao"}
+                    onChange={(e) => setMonthlyDelivered(e.target.value)}
+                  />
+                  Não entregue
+                </label>
+              </div>
+
+              {monthlyDelivered === "sim" && (
+                <>
+                  <input
+                    type="text"
+                    value={monthlyValue}
+                    onChange={(e) => setMonthlyValue(e.target.value)}
+                    placeholder={`Valor entregue (ex.: 8 ${formatUnit(
+                      kpi.unitType
+                    )})`}
+                    className="w-full rounded-md border border-slate-300 px-2 py-1 text-[11px] outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                  />
+                  <textarea
+                    value={monthlyComment}
+                    onChange={(e) => setMonthlyComment(e.target.value)}
+                    placeholder="Comentário (use se entregou abaixo da meta, teve atraso, etc.)"
+                    rows={2}
+                    className="w-full rounded-md border border-slate-300 px-2 py-1 text-[11px] outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                  />
+                </>
+              )}
+
+              {monthlyDelivered === "nao" && (
+                <textarea
+                  value={monthlyComment}
+                  onChange={(e) => setMonthlyComment(e.target.value)}
+                  placeholder="Motivo da não entrega"
+                  rows={2}
+                  className="w-full rounded-md border border-slate-300 px-2 py-1 text-[11px] outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                />
+              )}
+
+              <button
+                type="submit"
+                className="mt-1 w-full rounded-md bg-emerald-600 py-1 text-[11px] font-semibold text-white hover:bg-emerald-700 active:bg-emerald-800"
+              >
+                Registrar mês
+              </button>
+            </form>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default App;
