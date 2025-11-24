@@ -1,4 +1,4 @@
-// server.js - Goal Tracker – backend com Prisma + SQLite + JWT + Backup + CORS
+// server.js - Goal Tracker – backend com Prisma + SQLite + JWT + Backup (CORS liberado)
 
 const express = require("express");
 const cors = require("cors");
@@ -11,30 +11,9 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-me";
 
-// ===== CORS (dev + produção) =====
+// ===== CORS (liberado para qualquer origem, por enquanto) =====
 
-const ALLOWED_ORIGINS = [
-  "http://localhost:5173",
-  "http://localhost:5174",
-  // troque abaixo pela URL REAL do Netlify
-  "sorridentsqms.netlify.app",
-];
-
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      // chamadas sem origin (curl, Postman, etc) → libera
-      if (!origin) return callback(null, true);
-
-      if (ALLOWED_ORIGINS.includes(origin)) {
-        return callback(null, true);
-      }
-
-      return callback(new Error("Origin não permitido pelo CORS"), false);
-    },
-  })
-);
-
+app.use(cors());
 app.use(express.json());
 
 // ===== ROTA TESTE =====
@@ -43,7 +22,7 @@ app.get("/", (req, res) => {
   res.json({ ok: true, message: "API Goal Tracker rodando" });
 });
 
-// ===== LOGIN (gera JWT, mas ainda não obriga nas outras rotas) =====
+// ===== LOGIN (gera JWT, mas o front ainda não é obrigado a mandar) =====
 
 app.post("/api/login", async (req, res) => {
   try {
@@ -70,7 +49,7 @@ app.post("/api/login", async (req, res) => {
       { expiresIn: "8h" }
     );
 
-    // Front espera { token, user }
+    // Front usa { token, user }
     res.json({
       token,
       user: {
@@ -174,7 +153,6 @@ app.delete("/api/users/:id", async (req, res) => {
         .json({ error: "Não é permitido excluir o usuário admin." });
     }
 
-    // Relações com onDelete: Cascade no schema
     await prisma.user.delete({ where: { id } });
 
     res.json({ ok: true });
