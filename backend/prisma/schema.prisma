@@ -1,7 +1,8 @@
 // prisma/schema.prisma
 
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "darwin-arm64"]
 }
 
 datasource db {
@@ -10,14 +11,18 @@ datasource db {
 }
 
 model User {
-  id       Int    @id @default(autoincrement())
-  name     String
-  email    String @unique
-  password String
-  role     String
-  unit     String
+  id                 Int             @id @default(autoincrement())
+  name               String
+  email              String          @unique
+  password           String
+  role               String
+  unit               String
+  mustChangePassword Boolean         @default(false)
 
-  kpis     Kpi[]
+  kpis               Kpi[]
+  passwordResets     PasswordReset[]
+  auditLogs          AuditLog[]
+  progressEntries    ProgressEntry[]
 }
 
 model Kpi {
@@ -29,10 +34,11 @@ model Kpi {
   targetWeekly  Int?
   targetMonthly Int?
 
-  ownerId  Int
-  owner    User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  ownerId  Int?
+  owner    User?     @relation(fields: [ownerId], references: [id], onDelete: SetNull)
 
   progresses Progress[]
+  entries    ProgressEntry[]
 }
 
 model Progress {
@@ -47,4 +53,41 @@ model Progress {
   kpi Kpi @relation(fields: [kpiId], references: [id], onDelete: Cascade)
 
   @@unique([kpiId, periodType, periodKey])
+}
+
+model ProgressEntry {
+  id         Int      @id @default(autoincrement())
+  kpiId      Int
+  periodType String
+  periodKey  String
+  delivered  Boolean
+  value      String
+  comment    String
+  createdAt  DateTime @default(now())
+  userId     Int?
+
+  kpi   Kpi  @relation(fields: [kpiId], references: [id], onDelete: Cascade)
+  user  User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+}
+
+model PasswordReset {
+  id        Int      @id @default(autoincrement())
+  email     String
+  token     String   @unique
+  expiresAt DateTime
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  userId Int?
+  user   User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model AuditLog {
+  id        Int      @id @default(autoincrement())
+  userId    Int?
+  action    String
+  details   String
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
 }

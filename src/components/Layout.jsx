@@ -3,9 +3,27 @@ import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { LayoutDashboard, Users, LogOut, Target } from 'lucide-react';
 
+function NavItem({ to, icon, children }) {
+    const location = useLocation();
+    const isActive = location.pathname === to;
+    const Icon = icon;
+    return (
+        <Link
+            to={to}
+            className={`flex items-center gap-3 px-4 py-3 rounded-lg transition-colors duration-200
+          ${isActive
+                    ? 'bg-primary-50 text-primary-700 font-medium'
+                    : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                }`}
+        >
+            <Icon className="w-5 h-5" />
+            {children}
+        </Link>
+    );
+}
+
 export default function Layout() {
     const { user, logout } = useAuth();
-    const location = useLocation();
     const navigate = useNavigate();
 
     const handleLogout = () => {
@@ -14,23 +32,6 @@ export default function Layout() {
     };
 
     if (!user) return null;
-
-    const NavItem = ({ to, icon: Icon, children }) => {
-        const isActive = location.pathname === to;
-        return (
-            <Link
-                to={to}
-                className={`flex items-center gap-3 px-4 py-3 rounded-lg transition-colors duration-200
-          ${isActive
-                        ? 'bg-primary-50 text-primary-700 font-medium'
-                        : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
-                    }`}
-            >
-                <Icon className="w-5 h-5" />
-                {children}
-            </Link>
-        );
-    };
 
     return (
         <div className="min-h-screen bg-slate-50 flex">

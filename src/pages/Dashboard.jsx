@@ -6,7 +6,7 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContaine
 import { CheckCircle, Circle, TrendingUp, Calendar } from 'lucide-react';
 
 export default function Dashboard() {
-    const { user, getMyGoals, updateGoalProgress, getAllGoals, getAllUsers } = useAuth();
+    const { user, getMyGoals, updateGoalProgress, getAllGoals } = useAuth();
     const goals = user.role === 'ADMIN' ? getAllGoals() : getMyGoals();
 
     const handleIncrement = (goal) => {
