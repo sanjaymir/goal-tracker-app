@@ -220,12 +220,6 @@ function adminOnly(req, res, next) {
   next();
 }
 
-// ===== ROTA TESTE =====
-
-app.get("/", (req, res) => {
-  res.json({ ok: true, message: "API Goal Tracker rodando" });
-});
-
 // ===== LOGIN (sem JWT obrigatório) =====
 
 app.post("/api/login", loginLimiter, async (req, res) => {
