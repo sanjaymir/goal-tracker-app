@@ -1,6 +1,7 @@
 // server.js - Goal Tracker – backend com Prisma 6 + SQLite + JWT
 
 const express = require("express");
+const path = require("path");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
@@ -1254,6 +1255,20 @@ app.post("/api/backup/import", backupLimiter, authMiddleware, adminOnly, async (
     console.error("Erro ao importar backup:", err);
     res.status(500).json({ error: "Erro ao importar backup." });
   }
+});
+
+// ===== SERVE FRONTEND (React build) =====
+// Em produção no Render, servimos os arquivos estáticos gerados pelo Vite
+// a partir da pasta dist localizada na raiz do repositório.
+
+const distPath = path.join(__dirname, "..", "dist");
+
+app.use(express.static(distPath));
+
+// SPA fallback: qualquer rota que não comece com /api deve devolver index.html
+app.get("*", (req, res, next) => {
+  if (req.path.startsWith("/api/")) return next();
+  return res.sendFile(path.join(distPath, "index.html"));
 });
 
 // auditoria (admin)
