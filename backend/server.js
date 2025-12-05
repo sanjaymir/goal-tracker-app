@@ -146,7 +146,9 @@ function buildCookieOptions(maxAgeMs) {
   const isProd = process.env.NODE_ENV === "production";
   return {
     httpOnly: true,
-    sameSite: "lax",
+    // Em produção usamos SameSite=None para permitir cookies
+    // entre domínios diferentes (Netlify -> Render) com HTTPS.
+    sameSite: isProd ? "none" : "lax",
     secure: isProd,
     maxAge: maxAgeMs,
     path: "/",
