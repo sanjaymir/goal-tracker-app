@@ -593,6 +593,51 @@ function App() {
     }
   }
 
+  async function handleMakeUserAdmin(userId) {
+    if (!currentUser) {
+      alert("Sessão expirada. Faça login novamente.");
+      handleLogout();
+      return;
+    }
+
+    const user = users.find((u) => u.id === userId);
+    if (!user) return;
+
+    const confirmPromote = window.confirm(
+      `Tornar "${user.name}" um administrador?`
+    );
+    if (!confirmPromote) return;
+
+    try {
+      const res = await fetch(
+        `${API_BASE_URL}/api/users/${userId}/make-admin`,
+        {
+          method: "POST",
+          credentials: "include",
+        }
+      );
+
+      if (res.status === 401) {
+        alert("Sessão expirada. Faça login novamente.");
+        handleLogout();
+        return;
+      }
+
+      if (!res.ok) {
+        alert("Erro ao promover usuário para admin.");
+        return;
+      }
+
+      const updated = await res.json();
+      setUsers((prev) =>
+        prev.map((u) => (u.id === updated.id ? updated : u))
+      );
+    } catch (err) {
+      console.error(err);
+      alert("Erro ao conectar com o servidor ao promover usuário.");
+    }
+  }
+
   // --------- CRUD KPI (via backend) ----------
 
   async function handleCreateKpi(kpiData) {
@@ -875,6 +920,7 @@ function App() {
             progress={progress}
             onCreateUser={handleCreateUser}
             onDeleteUser={handleDeleteUser}
+            onMakeUserAdmin={handleMakeUserAdmin}
             onCreateKpi={handleCreateKpi}
             onUpdateKpi={handleUpdateKpi}
             onDeleteKpi={handleDeleteKpi}
@@ -2097,26 +2143,41 @@ function AdminDashboard({
                   >
                     <div>
                       <div className="font-medium text-slate-900">
-                        {u.name}
+                        {u.name}{" "}
+                        {u.role === "admin" && (
+                          <span className="text-[10px] ml-1 rounded-full border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-amber-700">
+                            Admin
+                          </span>
+                        )}
                       </div>
                       <div className="text-[11px] text-slate-500">
                         {u.email} • {u.unit}
                       </div>
                     </div>
                     {u.role !== "admin" && (
-                      <button
-                        onClick={() => onDeleteUser(u.id)}
-                        className="text-xs text-red-500 hover:text-red-600"
-                      >
-                        Excluir
-                      </button>
+                      <div className="flex flex-col items-end gap-1">
+                        <button
+                          type="button"
+                          onClick={() => onMakeUserAdmin(u.id)}
+                          className="text-xs text-sky-600 hover:text-sky-700"
+                        >
+                          Tornar admin
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onDeleteUser(u.id)}
+                          className="text-xs text-red-500 hover:text-red-600"
+                        >
+                          Excluir
+                        </button>
+                      </div>
                     )}
                   </li>
                 ))}
               </ul>
             )}
-          </div>
-        </div>
+         </div>
+       </div>
       </section>
 
       {/* Criação e lista de KPIs */}
