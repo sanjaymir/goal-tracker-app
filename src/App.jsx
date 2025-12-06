@@ -949,6 +949,7 @@ function AdminDashboard({
   progress,
   onCreateUser,
   onDeleteUser,
+  onMakeUserAdmin,
   onCreateKpi,
   onUpdateKpi,
   onDeleteKpi,
