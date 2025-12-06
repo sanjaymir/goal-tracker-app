@@ -32,11 +32,6 @@ const JWT_SECRET = (() => {
 const ACCESS_TOKEN_TTL = process.env.ACCESS_TOKEN_TTL || "15m";
 const REFRESH_TOKEN_TTL = process.env.REFRESH_TOKEN_TTL || "7d";
 
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || "http://localhost:5173")
-  .split(",")
-  .map((o) => o.trim())
-  .filter(Boolean);
-
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
   max: 10, // 10 tentativas
@@ -87,19 +82,14 @@ function getYearMonthFromDateKey(dateKey) {
   return { year, month };
 }
 
-function isOriginAllowed(origin) {
-  if (!origin) return true; // requests without origin (e.g., curl/postman)
-  return allowedOrigins.includes(origin);
-}
-
 // ===== MIDDLEWARES GERAIS =====
 
 app.use(
   cors({
-    origin: (origin, callback) => {
-      if (isOriginAllowed(origin)) return callback(null, true);
-      return callback(new Error("Origin não autorizada pelo CORS."));
-    },
+    // Em produção estamos servindo o frontend e o backend no mesmo domínio.
+    // Mantemos origin: true para refletir qualquer origem que fizer requisição,
+    // e credentials: true para permitir cookies.
+    origin: true,
     credentials: true,
   })
 );
