@@ -8,7 +8,6 @@ const bcrypt = require("bcryptjs");
 const cookieParser = require("cookie-parser");
 const rateLimit = require("express-rate-limit");
 const { PrismaClient } = require("@prisma/client");
-const nodemailer = require("nodemailer");
 const crypto = require("crypto");
 
 const prisma = new PrismaClient();
@@ -140,29 +139,64 @@ function getAppBaseUrl() {
   return process.env.APP_BASE_URL || "http://localhost:3000";
 }
 
-function createMailTransporter() {
-  if (!process.env.SMTP_HOST) {
+function getMailFrom() {
+  const raw = process.env.MAIL_FROM || "no-reply@goal-tracker.local";
+  const emailMatch = raw.match(/<(.+?)>/);
+  const nameMatch = raw.match(/"(.+?)"/);
+  const email = emailMatch ? emailMatch[1] : raw;
+  const name = nameMatch ? nameMatch[1] : "Goal Tracker";
+  return { email, name };
+}
+
+async function sendResetEmailBrevo(toEmail, token) {
+  const apiKey = process.env.BREVO_API_KEY;
+  if (!apiKey) {
     console.warn(
-      "[mail] SMTP_HOST não definido; e-mails de recuperação NÃO serão enviados."
+      "[mail] BREVO_API_KEY não definido; e-mails de recuperação NÃO serão enviados."
     );
-    return null;
+    return;
   }
 
-  const port = Number(process.env.SMTP_PORT || "587");
+  const appBase = getAppBaseUrl().replace(/\/+$/, "");
+  const resetLink = `${appBase}/?resetToken=${encodeURIComponent(token)}`;
+  const { email: fromEmail, name: fromName } = getMailFrom();
 
-  const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port,
-    secure: port === 465,
-    auth: process.env.SMTP_USER
-      ? {
-          user: process.env.SMTP_USER,
-          pass: process.env.SMTP_PASS || "",
-        }
-      : undefined,
+  const payload = {
+    sender: { email: fromEmail, name: fromName },
+    to: [{ email: toEmail }],
+    subject: "Redefinição de senha – Goal Tracker",
+    textContent: `Olá,
+
+Foi solicitada a redefinição de senha da sua conta.
+
+Acesse o link abaixo para definir uma nova senha (válido por 30 minutos):
+
+${resetLink}
+
+Se você não solicitou, ignore este e-mail.`,
+    htmlContent: `<p>Olá,</p>
+<p>Foi solicitada a redefinição de senha da sua conta.</p>
+<p>Acesse o link abaixo para definir uma nova senha (válido por 30 minutos):</p>
+<p><a href="${resetLink}">${resetLink}</a></p>
+<p>Se você não solicitou, ignore este e-mail.</p>`,
+  };
+
+  const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: {
+      "api-key": apiKey,
+      "Content-Type": "application/json",
+      accept: "application/json",
+    },
+    body: JSON.stringify(payload),
   });
 
-  return transporter;
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    console.error(
+      `[mail] Falha ao enviar e-mail via Brevo: ${res.status} – ${body}`
+    );
+  }
 }
 
 function buildCookieOptions(maxAgeMs) {
@@ -442,33 +476,11 @@ app.post("/api/forgot-password", async (req, res) => {
       },
     });
 
-    // tenta enviar e-mail se SMTP estiver configurado
-    const transporter = createMailTransporter();
-    if (transporter) {
-      const appBase = getAppBaseUrl().replace(/\/+$/, "");
-      const resetLink = `${appBase}/?resetToken=${encodeURIComponent(token)}`;
-
-      try {
-        await transporter.sendMail({
-          from:
-            process.env.MAIL_FROM ||
-            `"Goal Tracker" <no-reply@goal-tracker.local>`,
-          to: normalizedEmail,
-          subject: "Redefinição de senha – Goal Tracker",
-          text: `Olá,\n\nFoi solicitada a redefinição de senha da sua conta.\n\nAcesse o link abaixo para definir uma nova senha (válido por 30 minutos):\n\n${resetLink}\n\nSe você não solicitou, ignore este e-mail.\n`,
-          html: `<p>Olá,</p>
-<p>Foi solicitada a redefinição de senha da sua conta.</p>
-<p>Acesse o link abaixo para definir uma nova senha (válido por 30 minutos):</p>
-<p><a href="${resetLink}">${resetLink}</a></p>
-<p>Se você não solicitou, ignore este e-mail.</p>`,
-        });
-      } catch (mailErr) {
-        console.error("Erro ao enviar e-mail de recuperação:", mailErr);
-      }
-    } else {
-      console.warn(
-        `[mail] SMTP não configurado; token de recuperação gerado para ${normalizedEmail}.`
-      );
+    // tenta enviar e-mail via Brevo (HTTP API)
+    try {
+      await sendResetEmailBrevo(normalizedEmail, token);
+    } catch (mailErr) {
+      console.error("Erro ao enviar e-mail de recuperação:", mailErr);
     }
 
     // resposta sempre genérica
