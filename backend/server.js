@@ -8,6 +8,7 @@ const bcrypt = require("bcryptjs");
 const cookieParser = require("cookie-parser");
 const rateLimit = require("express-rate-limit");
 const { PrismaClient } = require("@prisma/client");
+const nodemailer = require("nodemailer");
 const crypto = require("crypto");
 
 const prisma = new PrismaClient();
@@ -131,6 +132,37 @@ function resetFailures(email) {
 
 function generateResetToken() {
   return crypto.randomBytes(32).toString("hex");
+}
+
+// ===== EMAIL (ENV-BASED) =====
+
+function getAppBaseUrl() {
+  return process.env.APP_BASE_URL || "http://localhost:3000";
+}
+
+function createMailTransporter() {
+  if (!process.env.SMTP_HOST) {
+    console.warn(
+      "[mail] SMTP_HOST não definido; e-mails de recuperação NÃO serão enviados."
+    );
+    return null;
+  }
+
+  const port = Number(process.env.SMTP_PORT || "587");
+
+  const transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port,
+    secure: port === 465,
+    auth: process.env.SMTP_USER
+      ? {
+          user: process.env.SMTP_USER,
+          pass: process.env.SMTP_PASS || "",
+        }
+      : undefined,
+  });
+
+  return transporter;
 }
 
 function buildCookieOptions(maxAgeMs) {
@@ -410,7 +442,36 @@ app.post("/api/forgot-password", async (req, res) => {
       },
     });
 
-    // Em produção, enviaríamos por e-mail. Aqui retornamos resposta genérica.
+    // tenta enviar e-mail se SMTP estiver configurado
+    const transporter = createMailTransporter();
+    if (transporter) {
+      const appBase = getAppBaseUrl().replace(/\/+$/, "");
+      const resetLink = `${appBase}/?resetToken=${encodeURIComponent(token)}`;
+
+      try {
+        await transporter.sendMail({
+          from:
+            process.env.MAIL_FROM ||
+            `"Goal Tracker" <no-reply@goal-tracker.local>`,
+          to: normalizedEmail,
+          subject: "Redefinição de senha – Goal Tracker",
+          text: `Olá,\n\nFoi solicitada a redefinição de senha da sua conta.\n\nAcesse o link abaixo para definir uma nova senha (válido por 30 minutos):\n\n${resetLink}\n\nSe você não solicitou, ignore este e-mail.\n`,
+          html: `<p>Olá,</p>
+<p>Foi solicitada a redefinição de senha da sua conta.</p>
+<p>Acesse o link abaixo para definir uma nova senha (válido por 30 minutos):</p>
+<p><a href="${resetLink}">${resetLink}</a></p>
+<p>Se você não solicitou, ignore este e-mail.</p>`,
+        });
+      } catch (mailErr) {
+        console.error("Erro ao enviar e-mail de recuperação:", mailErr);
+      }
+    } else {
+      console.warn(
+        `[mail] SMTP não configurado; token de recuperação gerado para ${normalizedEmail}.`
+      );
+    }
+
+    // resposta sempre genérica
     res.json({
       message: "Se existir, você receberá instruções para redefinir a senha.",
     });

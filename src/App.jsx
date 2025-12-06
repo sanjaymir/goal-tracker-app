@@ -212,6 +212,14 @@ function App() {
   const [showRecover, setShowRecover] = useState(false);
   const [recoverEmail, setRecoverEmail] = useState("");
   const [recoverMessage, setRecoverMessage] = useState("");
+  const [resetToken, setResetToken] = useState(() => {
+    if (typeof window === "undefined") return "";
+    const params = new URLSearchParams(window.location.search);
+    return params.get("resetToken") || "";
+  });
+  const [resetPassword, setResetPassword] = useState("");
+  const [resetConfirm, setResetConfirm] = useState("");
+  const [resetMessage, setResetMessage] = useState("");
 
   const [globalError, setGlobalError] = useState("");
 
@@ -322,9 +330,31 @@ function App() {
     const email = recoverEmail.trim();
     if (!email) return;
 
-    setRecoverMessage(
-      "Se este e-mail estiver cadastrado, você receberá um link para redefinir sua senha (simulação)."
-    );
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/forgot-password`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email }),
+        });
+        if (res.ok) {
+          const data = await res.json().catch(() => ({}));
+          setRecoverMessage(
+            data.message ||
+              "Se este e-mail estiver cadastrado, você receberá um link para redefinir sua senha."
+          );
+        } else {
+          setRecoverMessage(
+            "Não foi possível iniciar a recuperação. Tente novamente mais tarde."
+          );
+        }
+      } catch (err) {
+        console.error("Erro ao chamar forgot-password:", err);
+        setRecoverMessage(
+          "Erro de conexão ao iniciar a recuperação de senha."
+        );
+      }
+    })();
   }
 
   // --------- PROGRESSO (chama backend) ----------
@@ -765,6 +795,100 @@ function App() {
   }
 
   // --------- TELA DE LOGIN ---------
+
+  if (!currentUser && resetToken) {
+    // Tela de redefinição de senha via link de e-mail
+    const handleResetSubmit = async (e) => {
+      e.preventDefault();
+      setResetMessage("");
+      if (!resetPassword || resetPassword.length < 6) {
+        setResetMessage("A nova senha deve ter pelo menos 6 caracteres.");
+        return;
+      }
+      if (resetPassword !== resetConfirm) {
+        setResetMessage("A confirmação de senha não confere.");
+        return;
+      }
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/reset-password`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            token: resetToken,
+            newPassword: resetPassword,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setResetMessage(
+            data.error || "Não foi possível redefinir a senha."
+          );
+          return;
+        }
+        setResetMessage(
+          "Senha redefinida com sucesso. Você já pode fazer login com a nova senha."
+        );
+        // limpa token da URL
+        if (typeof window !== "undefined") {
+          const url = new URL(window.location.href);
+          url.searchParams.delete("resetToken");
+          window.history.replaceState({}, "", url.toString());
+        }
+        setResetToken("");
+      } catch (err) {
+        console.error("Erro ao redefinir senha:", err);
+        setResetMessage("Erro de conexão ao redefinir a senha.");
+      }
+    };
+
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-100">
+        <div className="w-full max-w-md bg-white rounded-xl shadow-sm p-6">
+          <h1 className="text-2xl font-bold text-slate-900 mb-1">
+            Goal Tracker – Clínica
+          </h1>
+          <p className="text-sm text-slate-600 mb-4">
+            Redefinir senha da sua conta.
+          </p>
+          <form className="space-y-3" onSubmit={handleResetSubmit}>
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">
+                Nova senha
+              </label>
+              <input
+                type="password"
+                value={resetPassword}
+                onChange={(e) => setResetPassword(e.target.value)}
+                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                placeholder="Nova senha"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">
+                Confirmar nova senha
+              </label>
+              <input
+                type="password"
+                value={resetConfirm}
+                onChange={(e) => setResetConfirm(e.target.value)}
+                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                placeholder="Repita a nova senha"
+              />
+            </div>
+            {resetMessage && (
+              <p className="text-xs text-slate-600">{resetMessage}</p>
+            )}
+            <button
+              type="submit"
+              className="w-full rounded-md bg-emerald-600 py-2 text-sm font-semibold text-white hover:bg-emerald-700 active:bg-emerald-800"
+            >
+              Redefinir senha
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
 
   if (!currentUser) {
     return (
