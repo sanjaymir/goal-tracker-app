@@ -579,6 +579,58 @@ app.delete("/api/users/:id", authMiddleware, adminOnly, async (req, res) => {
   }
 });
 
+// tornar usuário admin
+app.post("/api/users/:id/make-admin", authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (Number.isNaN(id)) {
+      return res.status(400).json({ error: "ID inválido." });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id } });
+    if (!user) {
+      return res.status(404).json({ error: "Usuário não encontrado." });
+    }
+
+    if (user.role === "admin") {
+      return res.json({
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        unit: user.unit,
+        mustChangePassword: user.mustChangePassword,
+      });
+    }
+
+    const updated = await prisma.user.update({
+      where: { id },
+      data: { role: "admin" },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        unit: true,
+        mustChangePassword: true,
+      },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        userId: req.user.id,
+        action: "user_promote_admin",
+        details: JSON.stringify({ promotedUserId: id }),
+      },
+    });
+
+    res.json(updated);
+  } catch (err) {
+    console.error("Erro ao promover usuário para admin:", err);
+    res.status(500).json({ error: "Erro ao promover usuário." });
+  }
+});
+
 // ===== KPIS =====
 
 // listar KPIs

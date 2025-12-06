@@ -188,6 +188,40 @@ export default function AdminPage() {
     }
   }
 
+  // ----- tornar usuário admin -----
+
+  async function handleMakeAdmin(userId) {
+    const selected = users.find((u) => u.id === userId);
+    if (!selected) return;
+
+    if (!window.confirm(`Tornar "${selected.name}" um administrador?`)) {
+      return;
+    }
+
+    try {
+      const res = await fetch(
+        `${API_BASE_URL}/api/users/${userId}/make-admin`,
+        {
+          method: "POST",
+          credentials: "include",
+        }
+      );
+
+      if (!res.ok) {
+        alert("Erro ao promover usuário para admin.");
+        return;
+      }
+
+      const updated = await res.json();
+      setUsers((prev) =>
+        prev.map((u) => (u.id === updated.id ? updated : u))
+      );
+    } catch (err) {
+      console.error(err);
+      alert("Erro ao conectar com o servidor ao promover usuário.");
+    }
+  }
+
   // ----- criar KPI -----
 
   async function handleCreateKpi(e) {
@@ -392,12 +426,20 @@ export default function AdminPage() {
                           </div>
                         </div>
                         {u.role !== "admin" && (
-                          <button
-                            onClick={() => handleDeleteUser(u.id)}
-                            className="text-xs text-red-500 hover:text-red-600"
-                          >
-                            Excluir
-                          </button>
+                          <div className="flex flex-col items-end gap-1">
+                            <button
+                              onClick={() => handleMakeAdmin(u.id)}
+                              className="text-xs text-sky-600 hover:text-sky-700"
+                            >
+                              Tornar admin
+                            </button>
+                            <button
+                              onClick={() => handleDeleteUser(u.id)}
+                              className="text-xs text-red-500 hover:text-red-600"
+                            >
+                              Excluir
+                            </button>
+                          </div>
                         )}
                       </li>
                     );
