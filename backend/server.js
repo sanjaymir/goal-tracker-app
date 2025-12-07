@@ -921,20 +921,32 @@ function addDays(date, days) {
 }
 
 async function isHolidayDate(date) {
-  // date: Date em UTC representando meia-noite da data local
-  const dayStart = new Date(
-    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())
-  );
-  const nextDay = addDays(dayStart, 1);
-  const holiday = await prisma.holiday.findFirst({
-    where: {
-      date: {
-        gte: dayStart,
-        lt: nextDay,
+  try {
+    // date: Date em UTC representando meia-noite da data local
+    const dayStart = new Date(
+      Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())
+    );
+    const nextDay = addDays(dayStart, 1);
+    const holiday = await prisma.holiday.findFirst({
+      where: {
+        date: {
+          gte: dayStart,
+          lt: nextDay,
+        },
       },
-    },
-  });
-  return !!holiday;
+    });
+    return !!holiday;
+  } catch (err) {
+    // Em ambientes onde a tabela Holiday ainda não existe (ex.: banco antigo),
+    // tratamos como "sem feriado" para não quebrar a aplicação.
+    if (err && (err.code === "P2021" || err.code === "P2022")) {
+      console.warn(
+        "[holiday] Tabela Holiday ausente no banco; ignorando feriados até migração completa."
+      );
+      return false;
+    }
+    throw err;
+  }
 }
 
 async function adjustDueDateForHolidays(date) {
@@ -1000,6 +1012,35 @@ async function computeMonthlyPeriodNow() {
   return { startDate, endDate, dueDate };
 }
 
+async function createProgressEntrySafe(data) {
+  try {
+    // Em alguns ambientes (como o backend em produção),
+    // a tabela ProgressEntry ainda não possui as colunas
+    // startDate, endDate e dueDate. Removemos essas
+    // propriedades antes de chamar o Prisma para evitar
+    // erros de validação ou de coluna inexistente.
+    const cleaned = { ...data };
+    delete cleaned.startDate;
+    delete cleaned.endDate;
+    delete cleaned.dueDate;
+    delete cleaned.submittedAt;
+    delete cleaned.updatedAt;
+    delete cleaned.createdAt;
+    return await prisma.progressEntry.create({ data: cleaned });
+  } catch (err) {
+    // Se o banco ainda não tiver as colunas novas (startDate / endDate / dueDate),
+    // removemos essas propriedades e tentamos novamente para manter compatibilidade
+    // com bases antigas já em produção.
+    if (err && err.code === "P2022") {
+      console.warn(
+        "[progressEntry] Colunas de período ausentes; gravando entrada sem startDate/endDate/dueDate."
+      );
+      return prisma.progressEntry.create({ data: data });
+    }
+    throw err;
+  }
+}
+
 app.post("/api/progress", authMiddleware, async (req, res) => {
   try {
     const { kpiId, periodType, periodKey, delivered, value, comment } =
@@ -1057,20 +1098,18 @@ app.post("/api/progress", authMiddleware, async (req, res) => {
       }
     }
 
-    const entry = await prisma.progressEntry.create({
-      data: {
-        kpiId: kpiIdNum,
-        periodType,
-        periodKey,
-        delivered: !!delivered,
-        value: value || "",
-        comment: comment || "",
-        startDate,
-        endDate,
-        dueDate,
-        submittedAt: new Date(),
-        userId: req.user.id,
-      },
+    const entry = await createProgressEntrySafe({
+      kpiId: kpiIdNum,
+      periodType,
+      periodKey,
+      delivered: !!delivered,
+      value: value || "",
+      comment: comment || "",
+      startDate,
+      endDate,
+      dueDate,
+      submittedAt: new Date(),
+      userId: req.user.id,
     });
 
     const existing = await prisma.progress.findFirst({
@@ -1320,6 +1359,12 @@ app.get("/api/progress/history", authMiddleware, async (req, res) => {
     });
     res.json(entries);
   } catch (err) {
+    if (err && err.code === "P2022") {
+      console.warn(
+        "[history] Colunas de período ausentes no banco; retornando histórico vazio."
+      );
+      return res.json([]);
+    }
     console.error("Erro ao buscar histórico:", err);
     res.status(500).json({ error: "Erro ao buscar histórico." });
   }
