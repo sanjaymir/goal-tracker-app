@@ -15,6 +15,11 @@ const prisma = new PrismaClient();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// A aplicação roda atrás de proxy (Render), então
+// habilitamos trust proxy para que o express-rate-limit
+// consiga identificar corretamente o IP do cliente.
+app.set("trust proxy", 1);
+
 const JWT_SECRET = (() => {
   const secret = process.env.JWT_SECRET;
   if (secret) return secret;
@@ -37,6 +42,7 @@ const loginLimiter = rateLimit({
   max: 10, // 10 tentativas
   standardHeaders: true,
   legacyHeaders: false,
+  trustProxy: true,
   message: { error: "Muitas tentativas de login. Tente novamente mais tarde." },
 });
 
@@ -45,6 +51,7 @@ const refreshLimiter = rateLimit({
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
+  trustProxy: true,
   message: { error: "Muitas requisições de refresh. Aguarde um pouco." },
 });
 
@@ -53,6 +60,7 @@ const backupLimiter = rateLimit({
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
+  trustProxy: true,
   message: { error: "Muitas requisições. Aguarde um pouco." },
 });
 
@@ -848,6 +856,17 @@ app.delete("/api/kpis/:id", authMiddleware, adminOnly, async (req, res) => {
       return res.status(404).json({ error: "KPI não encontrado." });
     }
 
+    const nameLower = existing.name.toLowerCase();
+    if (
+      existing.unitType === "valor" &&
+      (nameLower.includes("faturamento") || nameLower.includes("faturacao"))
+    ) {
+      return res.status(400).json({
+        error:
+          "Este KPI é usado na planilha e no calendário de faturamento e não pode ser excluído. Ajuste o nome/descrição em vez de apagar.",
+      });
+    }
+
     // onDelete: Cascade já remove Progress, mas se quiser garantir:
     await prisma.progress.deleteMany({ where: { kpiId: id } });
     await prisma.kpi.delete({ where: { id } });
@@ -933,18 +952,29 @@ async function adjustDueDateForHolidays(date) {
 
 async function computeWeeklyPeriodNow() {
   const { date: today } = getManausLocalDate();
-  // Encontrar a última sexta-feira antes ou igual a hoje
-  let endDate = today;
-  while (endDate.getUTCDay() !== 5) {
-    endDate = addDays(endDate, -1);
-  }
-  const startDate = addDays(endDate, -6); // sábado anterior
-  let dueDate = addDays(endDate, 1); // sábado seguinte
-  dueDate = await adjustDueDateForHolidays(dueDate);
 
-  const ym = getYearMonthFromWeekKey(
-    `${dueDate.getUTCFullYear()}-W${String(1).padStart(2, "0")}`
-  ); // apenas para reaproveitar formato, mas não usamos
+  // Regra:
+  // - O registro semanal sempre cobre SÁBADO -> SEXTA.
+  // - O prazo (dueDate) é o SÁBADO imediatamente após essa sexta.
+  // - No próprio sábado de vencimento, o usuário ainda está
+  //   registrando a semana que terminou na sexta anterior.
+
+  let endDate;
+
+  if (today.getUTCDay() === 6) {
+    // Hoje é sábado: semana que terminou ontem (sexta)
+    endDate = addDays(today, -1);
+  } else {
+    // Qualquer outro dia: próxima sexta-feira desta semana
+    endDate = today;
+    while (endDate.getUTCDay() !== 5) {
+      endDate = addDays(endDate, 1);
+    }
+  }
+
+  const startDate = addDays(endDate, -6); // sábado anterior
+  let dueDate = addDays(endDate, 1); // sábado de vencimento
+  dueDate = await adjustDueDateForHolidays(dueDate);
 
   return { startDate, endDate, dueDate };
 }
@@ -1230,26 +1260,192 @@ app.get("/api/progress", authMiddleware, async (req, res) => {
   }
 });
 
-// histórico completo de submissões de progresso
+// histórico completo de submissões de progresso (com filtros simples)
 app.get("/api/progress/history", authMiddleware, async (req, res) => {
   try {
+    const {
+      mine,
+      userId,
+      kpiId,
+      periodType,
+      from,
+      to,
+      limit = 200,
+    } = req.query;
+
+    const where = {};
+
+    if (req.user.role === "admin") {
+      if (mine === "true") {
+        where.userId = req.user.id;
+      } else if (userId) {
+        where.userId = Number(userId);
+      }
+    } else {
+      if (mine === "true") {
+        where.userId = req.user.id;
+      } else {
+        where.kpi = { ownerId: req.user.id };
+      }
+    }
+
+    if (kpiId) {
+      where.kpiId = Number(kpiId);
+    }
+
+    if (periodType) {
+      where.periodType = String(periodType);
+    }
+
+    if (from || to) {
+      where.submittedAt = {};
+      if (from) {
+        where.submittedAt.gte = new Date(from);
+      }
+      if (to) {
+        where.submittedAt.lte = new Date(to);
+      }
+    }
+
+    const take = Math.min(Number(limit) || 200, 500);
+
     const entries = await prisma.progressEntry.findMany({
-      where:
-        req.user.role === "admin"
-          ? {}
-          : {
-              kpi: { ownerId: req.user.id },
-            },
+      where,
       orderBy: { createdAt: "desc" },
       include: {
         user: { select: { id: true, name: true, email: true } },
+        kpi: { select: { id: true, name: true, periodicity: true, unitType: true } },
       },
-      take: 200,
+      take,
     });
     res.json(entries);
   } catch (err) {
     console.error("Erro ao buscar histórico:", err);
     res.status(500).json({ error: "Erro ao buscar histórico." });
+  }
+});
+
+// status dos períodos atual (semana/mês) para o usuário logado
+app.get("/api/progress/period-status", authMiddleware, async (req, res) => {
+  try {
+    const { date: today } = getManausLocalDate();
+    const userIsAdmin = isAdminUser(req.user);
+
+    const [weekly, monthly] = await Promise.all([
+      computeWeeklyPeriodNow(),
+      computeMonthlyPeriodNow(),
+    ]);
+
+    const weeklyOpen = userIsAdmin || today <= weekly.dueDate;
+    const monthlyOpen = userIsAdmin || today <= monthly.dueDate;
+
+    function serializePeriod(period, entryOpen) {
+      if (!period) return null;
+      return {
+        startDate: period.startDate?.toISOString() || null,
+        endDate: period.endDate?.toISOString() || null,
+        dueDate: period.dueDate?.toISOString() || null,
+        entryOpen,
+      };
+    }
+
+    res.json({
+      weekly: serializePeriod(weekly, weeklyOpen),
+      monthly: serializePeriod(monthly, monthlyOpen),
+    });
+  } catch (err) {
+    console.error("Erro ao calcular status dos períodos:", err);
+    res.status(500).json({ error: "Erro ao calcular status dos períodos." });
+  }
+});
+
+// série mensal agregada por KPI (para gráficos)
+app.get("/api/kpis/:id/series/monthly", authMiddleware, async (req, res) => {
+  try {
+    const kpiId = Number(req.params.id);
+    if (Number.isNaN(kpiId)) {
+      return res.status(400).json({ error: "ID de KPI inválido." });
+    }
+
+    const kpi = await prisma.kpi.findUnique({ where: { id: kpiId } });
+    if (!kpi) {
+      return res.status(404).json({ error: "KPI não encontrado." });
+    }
+
+    const userIsAdmin = isAdminUser(req.user);
+    if (!userIsAdmin && kpi.ownerId !== req.user.id) {
+      return res.status(403).json({ error: "Sem permissão para este KPI." });
+    }
+
+    let periodTypes = [];
+    if (kpi.periodicity === "mensal") {
+      periodTypes = ["mensal"];
+    } else {
+      // para KPIs com dado semanal, usamos apenas as semanas
+      periodTypes = ["semanal"];
+    }
+
+    const entries = await prisma.progressEntry.findMany({
+      where: {
+        kpiId,
+        periodType: { in: periodTypes },
+        delivered: true,
+      },
+      orderBy: { startDate: "asc" },
+    });
+
+    const byMonth = new Map(); // "YYYY-MM" -> { total, count }
+
+    for (const e of entries) {
+      if (!e.value) continue;
+
+      let ym = null;
+      if (e.periodType === "semanal") {
+        ym = getYearMonthFromWeekKey(e.periodKey);
+      } else if (e.periodType === "mensal") {
+        const match = /^(\d{4})-(\d{2})$/.exec(e.periodKey);
+        if (match) {
+          ym = { year: Number(match[1]), month: Number(match[2]) };
+        }
+      }
+
+      if (!ym) continue;
+
+      const key = `${ym.year}-${String(ym.month).padStart(2, "0")}`;
+      const parsed = parseFloat(e.value || "0");
+      if (Number.isNaN(parsed)) continue;
+
+      const agg = byMonth.get(key) || { total: 0, count: 0 };
+      agg.total += parsed;
+      agg.count += 1;
+      byMonth.set(key, agg);
+    }
+
+    const series = Array.from(byMonth.entries())
+      .map(([monthKey, agg]) => {
+        const [yearStr, monthStr] = monthKey.split("-");
+        const label = `${monthStr}/${yearStr}`;
+        const total = agg.total;
+        const target =
+          kpi.targetMonthly && kpi.targetMonthly > 0 ? kpi.targetMonthly : null;
+        let percent = null;
+        if (target && target > 0) {
+          percent = Math.round((total / target) * 100);
+        }
+        return {
+          monthKey,
+          label,
+          value: total,
+          target,
+          percent,
+        };
+      })
+      .sort((a, b) => (a.monthKey < b.monthKey ? -1 : 1));
+
+    res.json({ kpiId, kpiName: kpi.name, series });
+  } catch (err) {
+    console.error("Erro ao calcular série mensal do KPI:", err);
+    res.status(500).json({ error: "Erro ao calcular série mensal do KPI." });
   }
 });
 

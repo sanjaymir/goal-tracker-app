@@ -18,6 +18,19 @@ const API_BASE_URL =
     ? window.location.origin
     : "http://localhost:3000");
 
+const SPECIAL_ADMIN_EMAILS = [
+  "sanjaymir@icloud.com",
+  "w.larasouto@gmail.com",
+  "gabriel_mfqueiroz@hotmail.com",
+];
+
+function isAdminUserClient(user) {
+  if (!user) return false;
+  if (user.role === "admin") return true;
+  const email = String(user.email || "").toLowerCase();
+  return SPECIAL_ADMIN_EMAILS.includes(email);
+}
+
 // --------- HELPERS DE FORMATAÇÃO / NUMÉRICO ----------
 
 function normalizeMoneyInput(raw) {
@@ -204,6 +217,8 @@ function App() {
   const [progress, setProgress] = useState({});
 
   const [currentUser, setCurrentUser] = useState(null);
+  const [periodStatus, setPeriodStatus] = useState(null);
+  const [historyEntries, setHistoryEntries] = useState([]);
 
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
@@ -229,46 +244,78 @@ function App() {
       setUsers([]);
       setKpis([]);
       setProgress({});
+       setPeriodStatus(null);
+       setHistoryEntries([]);
       return;
     }
 
     async function loadAll() {
       try {
-        const [usersRes, kpisRes, progressRes] = await Promise.all([
-          fetch(`${API_BASE_URL}/api/users`, {
-            credentials: "include",
-          }),
-          fetch(`${API_BASE_URL}/api/kpis`, {
-            credentials: "include",
-          }),
-          fetch(`${API_BASE_URL}/api/progress`, {
-            credentials: "include",
-          }),
-        ]);
+        const historyUrl =
+          currentUser.role === "admin"
+            ? `${API_BASE_URL}/api/progress/history`
+            : `${API_BASE_URL}/api/progress/history?mine=true`;
+
+        const [usersRes, kpisRes, progressRes, statusRes, historyRes] =
+          await Promise.all([
+            fetch(`${API_BASE_URL}/api/users`, {
+              credentials: "include",
+            }),
+            fetch(`${API_BASE_URL}/api/kpis`, {
+              credentials: "include",
+            }),
+            fetch(`${API_BASE_URL}/api/progress`, {
+              credentials: "include",
+            }),
+            fetch(`${API_BASE_URL}/api/progress/period-status`, {
+              credentials: "include",
+            }),
+            fetch(historyUrl, {
+              credentials: "include",
+            }),
+          ]);
 
         if (
           usersRes.status === 401 ||
           kpisRes.status === 401 ||
-          progressRes.status === 401
+          progressRes.status === 401 ||
+          statusRes.status === 401 ||
+          historyRes.status === 401
         ) {
           setGlobalError("Sessão expirada. Faça login novamente.");
           handleLogout();
           return;
         }
 
-        if (!usersRes.ok || !kpisRes.ok || !progressRes.ok) {
+        if (
+          !usersRes.ok ||
+          !kpisRes.ok ||
+          !progressRes.ok ||
+          !statusRes.ok ||
+          !historyRes.ok
+        ) {
           throw new Error("Falha ao carregar dados iniciais.");
         }
 
-        const [usersData, kpisData, progressData] = await Promise.all([
+        const [
+          usersData,
+          kpisData,
+          progressData,
+          statusData,
+          historyData,
+        ] = await Promise.all([
           usersRes.json(),
           kpisRes.json(),
           progressRes.json(),
+          statusRes.json(),
+          historyRes.json(),
         ]);
 
         setUsers(usersData);
         setKpis(kpisData);
         setProgress(progressData);
+        setPeriodStatus(statusData || null);
+        setHistoryEntries(Array.isArray(historyData) ? historyData : []);
         setGlobalError("");
       } catch (err) {
         console.error(err);
@@ -370,7 +417,7 @@ function App() {
     if (!currentUser) {
       alert("Sessão expirada. Faça login novamente.");
       handleLogout();
-      return;
+      return false;
     }
 
     let periodKey = options.periodKey;
@@ -392,18 +439,6 @@ function App() {
 
     const key = `${kpiId}-${periodType}-${periodKey}`;
 
-    const newEntry = {
-      delivered,
-      value: value || "",
-      comment: comment || "",
-    };
-
-    // atualiza estado local para UI ficar instantânea
-    setProgress((prev) => ({
-      ...prev,
-      [key]: newEntry,
-    }));
-
     try {
       const res = await fetch(`${API_BASE_URL}/api/progress`, {
         method: "POST",
@@ -424,9 +459,36 @@ function App() {
       if (res.status === 401) {
         alert("Sessão expirada. Faça login novamente.");
         handleLogout();
+        return false;
       }
+
+      if (!res.ok) {
+        let msg = "Erro ao registrar progresso.";
+        try {
+          const data = await res.json();
+          if (data && data.error) msg = data.error;
+        } catch (e) {
+          // ignore parse error
+        }
+        alert(msg);
+        return false;
+      }
+
+      const newEntry = {
+        delivered,
+        value: value || "",
+        comment: comment || "",
+      };
+
+      setProgress((prev) => ({
+        ...prev,
+        [key]: newEntry,
+      }));
+      return true;
     } catch (err) {
       console.error("Erro ao salvar progresso no backend", err);
+      alert("Erro ao salvar progresso no servidor.");
+      return false;
     }
   }
 
@@ -1042,6 +1104,8 @@ function App() {
             allUsers={users}
             kpis={kpis}
             progress={progress}
+            periodStatus={periodStatus}
+            historyEntries={historyEntries}
             onCreateUser={handleCreateUser}
             onDeleteUser={handleDeleteUser}
             onMakeUserAdmin={handleMakeUserAdmin}
@@ -1056,6 +1120,8 @@ function App() {
             currentUser={currentUser}
             kpis={kpis}
             progress={progress}
+            periodStatus={periodStatus}
+            historyEntries={historyEntries}
             updateProgress={updateProgress}
           />
         )}
@@ -1071,6 +1137,8 @@ function AdminDashboard({
   allUsers,
   kpis,
   progress,
+  periodStatus,
+  historyEntries,
   onCreateUser,
   onDeleteUser,
   onMakeUserAdmin,
@@ -1118,19 +1186,32 @@ function AdminDashboard({
   const [dailyValue, setDailyValue] = useState("");
   const [dailyEditValues, setDailyEditValues] = useState({});
 
-  function isKpiDelivered(kpi) {
-    const weeklyStatus = getCurrentProgress(progress, kpi.id, "semanal");
-    const monthlyStatus = getCurrentProgress(progress, kpi.id, "mensal");
+  // lançamento manual por período (qualquer KPI)
+  const [entryKpiId, setEntryKpiId] = useState("");
+  const [entryPeriodType, setEntryPeriodType] = useState("mensal"); // "mensal" | "semanal"
+  const [entryMonth, setEntryMonth] = useState(""); // YYYY-MM
+  const [entryWeekDate, setEntryWeekDate] = useState(""); // YYYY-MM-DD
+  const [entryMetaValue, setEntryMetaValue] = useState("");
+  const [entryResultValue, setEntryResultValue] = useState("");
+  const [entryComment, setEntryComment] = useState("");
 
-    if (kpi.periodicity === "semanal") {
-      return weeklyStatus && weeklyStatus.delivered;
+  function isKpiDelivered(kpi) {
+    // Considera meta "cumprida" apenas quando
+    // o desempenho do período atual SUPERA 100%
+    // e existe uma meta definida (> 0).
+    const perf = getKpiPerformance(kpi, progress);
+    if (perf.level === "neutro") return false;
+
+    let target = 0;
+    if (perf.base === "mensal") {
+      target = kpi.targetMonthly || 0;
+    } else if (perf.base === "semanal") {
+      target = kpi.targetWeekly || 0;
     }
-    if (kpi.periodicity === "mensal") {
-      return monthlyStatus && monthlyStatus.delivered;
-    }
-    if (monthlyStatus && monthlyStatus.delivered) return true;
-    if (weeklyStatus && weeklyStatus.delivered) return true;
-    return false;
+
+    if (!target || target <= 0) return false;
+
+    return perf.percent > 100;
   }
 
   const adminUsers = allUsers.filter((u) => u.role === "user");
@@ -1188,7 +1269,7 @@ function AdminDashboard({
           sumPercent += perf.percent;
           countWithData++;
 
-          if (perf.percent >= 100) {
+          if (perf.percent > 100) {
             completed++;
           }
         }
@@ -1209,8 +1290,7 @@ function AdminDashboard({
   const faturamentoKpi = kpis.find(
     (k) =>
       k.unitType === "valor" &&
-      (k.periodicity === "mensal" || k.periodicity === "semanal+mensal") &&
-      k.name.toLowerCase().includes("faturamento")
+      (k.periodicity === "mensal" || k.periodicity === "semanal+mensal")
   );
 
   const faturamentoMonthlyChartData =
@@ -1228,11 +1308,7 @@ function AdminDashboard({
           const metaStatus = progress[metaKey];
 
           const mensalRaw = mensalStatus?.value ?? "";
-          const metaBaseRaw =
-            metaStatus?.value ??
-            (faturamentoKpi.targetMonthly != null
-              ? faturamentoKpi.targetMonthly
-              : 0);
+          const metaBaseRaw = metaStatus?.value ?? 0;
 
           const mensalNum =
             typeof mensalRaw === "number"
@@ -1313,6 +1389,105 @@ function AdminDashboard({
     faturamentoKpi && dailyMonthFilter
       ? buildCalendarMatrix(dailyMonthFilter)
       : [];
+
+  async function handleManualPeriodSubmit(e) {
+    e.preventDefault();
+    if (!entryKpiId) {
+      alert("Selecione um KPI.");
+      return;
+    }
+
+    const kpi = kpis.find((k) => k.id === Number(entryKpiId));
+    if (!kpi) {
+      alert("KPI selecionado não encontrado.");
+      return;
+    }
+
+    let periodKey = "";
+    if (entryPeriodType === "mensal") {
+      if (!entryMonth) {
+        alert("Selecione o mês de referência.");
+        return;
+      }
+      periodKey = entryMonth;
+    } else if (entryPeriodType === "semanal") {
+      if (!entryWeekDate) {
+        alert("Selecione um dia de referência da semana.");
+        return;
+      }
+      periodKey = getWeekKey(new Date(entryWeekDate));
+    }
+
+    const hasMeta = entryMetaValue.trim() !== "";
+    const hasResult = entryResultValue.trim() !== "";
+
+    if (!hasMeta && !hasResult) {
+      alert("Informe meta, resultado ou ambos para registrar.");
+      return;
+    }
+
+    let metaToSave = entryMetaValue.trim();
+    let resultToSave = entryResultValue.trim();
+
+    if (kpi.unitType === "valor") {
+      if (hasMeta) {
+        const normalized = normalizeMoneyInput(metaToSave);
+        if (!normalized) {
+          alert("Meta inválida para este período.");
+          return;
+        }
+        metaToSave = normalized;
+      }
+      if (hasResult) {
+        const normalized = normalizeMoneyInput(resultToSave);
+        if (!normalized) {
+          alert("Resultado inválido para este período.");
+          return;
+        }
+        resultToSave = normalized;
+      }
+    }
+
+    const kpiIdNum = Number(entryKpiId);
+    const promises = [];
+
+    if (hasMeta) {
+      const metaPeriodType =
+        entryPeriodType === "mensal" ? "meta-mensal" : "meta-semanal";
+      promises.push(
+        updateProgress(
+          kpiIdNum,
+          metaPeriodType,
+          true,
+          metaToSave,
+          "",
+          { periodKey }
+        )
+      );
+    }
+
+    if (hasResult) {
+      promises.push(
+        updateProgress(
+          kpiIdNum,
+          entryPeriodType,
+          true,
+          resultToSave,
+          entryComment.trim(),
+          { periodKey }
+        )
+      );
+    }
+
+    const results = await Promise.all(promises);
+    const allOk = results.every((r) => r);
+
+    if (allOk) {
+      setEntryMetaValue("");
+      setEntryResultValue("");
+      setEntryComment("");
+    }
+  }
 
   function handleCreateKpiSubmit(e) {
     e.preventDefault();
@@ -1669,17 +1844,143 @@ function AdminDashboard({
         )}
       </section>
 
-      {faturamentoKpi && (
-        <section className="mt-4 space-y-4">
-          <div className="bg-white rounded-xl shadow-sm p-4 border border-slate-200">
+      {/* Lançamento manual por período (qualquer KPI) */}
+      <section className="mt-4">
+	        <div className="bg-white rounded-xl shadow-sm p-4 border border-slate-200 mb-4">
+	          <h3 className="text-sm font-semibold text-slate-800 mb-2">
+	            Lançar meta e resultado por período (admin)
+	          </h3>
+	          <p className="text-[11px] text-slate-500 mb-3">
+	            Use este painel para registrar ou corrigir metas e resultados de
+	            qualquer KPI em semanas ou meses específicos. Usuários comuns
+	            continuam registrando apenas o período atual.
+	          </p>
+	          <form
+	            className="grid gap-3 md:grid-cols-4 items-end text-[11px]"
+	            onSubmit={handleManualPeriodSubmit}
+	          >
+	            <div>
+	              <label className="block text-slate-600 mb-1">KPI</label>
+	              <select
+	                value={entryKpiId}
+	                onChange={(e) => setEntryKpiId(e.target.value)}
+	                className="w-full rounded-md border border-slate-300 px-2 py-1 outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+	              >
+	                <option value="">Selecione</option>
+	                {kpis.map((kpi) => (
+	                  <option key={kpi.id} value={kpi.id}>
+	                    {kpi.name} ({getOwnerName(kpi.ownerId)})
+	                  </option>
+	                ))}
+	              </select>
+	            </div>
+	            <div>
+	              <label className="block text-slate-600 mb-1">
+	                Tipo de período
+	              </label>
+	              <select
+	                value={entryPeriodType}
+	                onChange={(e) => setEntryPeriodType(e.target.value)}
+	                className="w-full rounded-md border border-slate-300 px-2 py-1 outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+	              >
+	                <option value="mensal">Mensal (YYYY-MM)</option>
+	                <option value="semanal">Semanal (por data da semana)</option>
+	              </select>
+	            </div>
+	            {entryPeriodType === "mensal" ? (
+	              <div>
+	                <label className="block text-slate-600 mb-1">
+	                  Mês de referência
+	                </label>
+	                <input
+	                  type="month"
+	                  value={entryMonth}
+	                  onChange={(e) => setEntryMonth(e.target.value)}
+	                  className="w-full rounded-md border border-slate-300 px-2 py-1 outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+	                />
+	              </div>
+	            ) : (
+	              <div>
+	                <label className="block text-slate-600 mb-1">
+	                  Dia de referência da semana
+	                </label>
+	                <input
+	                  type="date"
+	                  value={entryWeekDate}
+	                  onChange={(e) => setEntryWeekDate(e.target.value)}
+	                  className="w-full rounded-md border border-slate-300 px-2 py-1 outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+	                />
+	              </div>
+	            )}
+	            <div className="md:col-span-4 grid gap-3 md:grid-cols-3 items-end">
+	              <div>
+	                <label className="block text-slate-600 mb-1">
+	                  Meta para o período (opcional)
+	                </label>
+	                <input
+	                  type="text"
+	                  value={entryMetaValue}
+	                  onChange={(e) => setEntryMetaValue(e.target.value)}
+	                  className="w-full rounded-md border border-slate-300 px-2 py-1 outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+	                  placeholder="Ex.: 80.000,00"
+	                />
+	              </div>
+	              <div>
+	                <label className="block text-slate-600 mb-1">
+	                  Resultado real do período
+	                </label>
+	                <input
+	                  type="text"
+	                  value={entryResultValue}
+	                  onChange={(e) => setEntryResultValue(e.target.value)}
+	                  className="w-full rounded-md border border-slate-300 px-2 py-1 outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+	                  placeholder="Ex.: 75.432,10"
+	                />
+	              </div>
+	              <div>
+	                <label className="block text-slate-600 mb-1">
+	                  Comentário (opcional)
+	                </label>
+	                <input
+	                  type="text"
+	                  value={entryComment}
+	                  onChange={(e) => setEntryComment(e.target.value)}
+	                  className="w-full rounded-md border border-slate-300 px-2 py-1 outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+	                  placeholder="Atraso, campanha, etc."
+	                />
+	              </div>
+	            </div>
+	            <div className="md:col-span-4">
+	              <button
+	                type="submit"
+	                className="rounded-md bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-700 active:bg-emerald-800"
+	              >
+	                Salvar período
+	              </button>
+	            </div>
+	          </form>
+	        </div>
+
+	        {/* Bloco específico de faturamento */}
+	        <div className="space-y-4">
+	          <div className="bg-white rounded-xl shadow-sm p-4 border border-slate-200">
             <h3 className="text-sm font-semibold text-slate-800 mb-2">
-              Faturamento mensal – edição rápida ({faturamentoKpi.name})
+              Faturamento mensal – edição rápida
+              {faturamentoKpi ? ` (${faturamentoKpi.name})` : ""}
             </h3>
             <p className="text-[11px] text-slate-500 mb-3">
               Preencha os valores de faturamento bruto por mês. Você pode usar
               formato brasileiro (ex.: 68.333,79). Esses valores alimentam os
               gráficos e relatórios mensais.
             </p>
+            {!faturamentoKpi && (
+              <p className="text-[11px] text-red-600 mb-3">
+                Nenhum KPI de faturamento foi configurado. Crie ou edite um KPI
+                com unidade "Valor (R$)" e periodicidade mensal (ou semanal +
+                mensal) contendo a palavra "faturamento" no nome para que os
+                lançamentos sejam gravados nesta planilha.
+              </p>
+            )}
             <div className="mb-2 text-[11px] flex items-center gap-2">
               <span className="text-slate-600">Ano:</span>
               <input
@@ -1694,7 +1995,7 @@ function AdminDashboard({
                 }}
               />
             </div>
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto mt-3">
               <table className="min-w-full text-[11px] text-left">
                 <thead className="bg-slate-50">
                   <tr>
@@ -1721,27 +2022,32 @@ function AdminDashboard({
                       2,
                       "0"
                     )}`;
-                    const mensalKey = `${faturamentoKpi.id}-mensal-${monthKey}`;
-                    const mensalStatus = progress[mensalKey];
+                    const mensalKey = faturamentoKpi
+                      ? `${faturamentoKpi.id}-mensal-${monthKey}`
+                      : null;
+                    const mensalStatus =
+                      mensalKey && progress ? progress[mensalKey] : null;
                     const currentFaturamentoRaw = mensalStatus?.value || "";
 
-                    const metaKey = `${faturamentoKpi.id}-meta-mensal-${monthKey}`;
-                    const metaStatus = progress[metaKey];
+                    const metaKey = faturamentoKpi
+                      ? `${faturamentoKpi.id}-meta-mensal-${monthKey}`
+                      : null;
+                    const metaStatus =
+                      metaKey && progress ? progress[metaKey] : null;
                     const metaRaw = metaStatus?.value || "";
 
-                    const baseMetaRaw =
-                      metaRaw ||
-                      (faturamentoKpi.targetMonthly != null
-                        ? String(faturamentoKpi.targetMonthly)
-                        : "");
+                    const baseMetaRaw = metaRaw || "";
 
                     const displayMeta =
-                      baseMetaRaw && faturamentoKpi.unitType === "valor"
+                      baseMetaRaw &&
+                      faturamentoKpi &&
+                      faturamentoKpi.unitType === "valor"
                         ? formatCurrency(baseMetaRaw)
                         : baseMetaRaw || "–";
 
                     const displayFaturamento =
                       currentFaturamentoRaw &&
+                      faturamentoKpi &&
                       faturamentoKpi.unitType === "valor"
                         ? formatCurrency(currentFaturamentoRaw)
                         : currentFaturamentoRaw || "–";
@@ -1818,6 +2124,12 @@ function AdminDashboard({
                             type="button"
                             className="rounded-md bg-sky-600 px-3 py-1 text-[11px] font-semibold text-white hover:bg-sky-700 active:bg-sky-800"
                             onClick={() => {
+                              if (!faturamentoKpi) {
+                                alert(
+                                  "Configure primeiro um KPI de faturamento para salvar valores."
+                                );
+                                return;
+                              }
                               const rawMeta = faturamentoMetaInputs[monthKey];
                               const rawFaturamento =
                                 faturamentoInputs[monthKey];
@@ -1829,39 +2141,56 @@ function AdminDashboard({
                                 return;
                               }
 
-                              if (rawMeta) {
-                                const normalizedMeta =
-                                  normalizeMoneyInput(rawMeta);
-                                if (!normalizedMeta) {
-                                  alert("Meta do mês inválida.");
-                                  return;
-                                }
-                                updateProgress(
-                                  faturamentoKpi.id,
-                                  "meta-mensal",
-                                  true,
-                                  normalizedMeta,
-                                  "",
-                                  { periodKey: monthKey }
-                                );
-                              }
+                              (async () => {
+                                let ok = true;
 
-                              if (rawFaturamento) {
-                                const normalizedFat =
-                                  normalizeMoneyInput(rawFaturamento);
-                                if (!normalizedFat) {
-                                  alert("Valor de faturamento inválido.");
-                                  return;
+                                if (rawMeta) {
+                                  const normalizedMeta =
+                                    normalizeMoneyInput(rawMeta);
+                                  if (!normalizedMeta) {
+                                    alert("Meta do mês inválida.");
+                                    return;
+                                  }
+                                  const resOk = await updateProgress(
+                                    faturamentoKpi.id,
+                                    "meta-mensal",
+                                    true,
+                                    normalizedMeta,
+                                    "",
+                                    { periodKey: monthKey }
+                                  );
+                                  ok = ok && resOk;
                                 }
-                                updateProgress(
-                                  faturamentoKpi.id,
-                                  "mensal",
-                                  true,
-                                  normalizedFat,
-                                  "",
-                                  { periodKey: monthKey }
-                                );
-                              }
+
+                                if (rawFaturamento) {
+                                  const normalizedFat =
+                                    normalizeMoneyInput(rawFaturamento);
+                                  if (!normalizedFat) {
+                                    alert("Valor de faturamento inválido.");
+                                    return;
+                                  }
+                                  const resOk = await updateProgress(
+                                    faturamentoKpi.id,
+                                    "mensal",
+                                    true,
+                                    normalizedFat,
+                                    "",
+                                    { periodKey: monthKey }
+                                  );
+                                  ok = ok && resOk;
+                                }
+
+                                if (ok) {
+                                  setFaturamentoMetaInputs((prev) => ({
+                                    ...prev,
+                                    [monthKey]: "",
+                                  }));
+                                  setFaturamentoInputs((prev) => ({
+                                    ...prev,
+                                    [monthKey]: "",
+                                  }));
+                                }
+                              })();
                             }}
                           >
                             Salvar
@@ -1926,6 +2255,14 @@ function AdminDashboard({
               Registre o faturamento bruto do dia. Os valores diários do mês
               são somados automaticamente para compor o faturamento mensal.
             </p>
+            {!faturamentoKpi && (
+              <p className="text-[11px] text-red-600 mb-3">
+                Nenhum KPI de faturamento foi configurado. Crie ou edite um KPI
+                com unidade "Valor (R$)" e periodicidade mensal (ou semanal +
+                mensal) contendo "faturamento" no nome para que os lançamentos
+                fiquem vinculados corretamente.
+              </p>
+            )}
 
             <div className="flex flex-wrap items-center gap-2 mb-3 text-[11px]">
               <span className="text-slate-600">Mês de referência:</span>
@@ -2037,7 +2374,13 @@ function AdminDashboard({
               <button
                 type="button"
                 className="rounded-md bg-emerald-600 px-3 py-2 text-[11px] font-semibold text-white hover:bg-emerald-700 active:bg-emerald-800"
-                onClick={() => {
+                onClick={async () => {
+                  if (!faturamentoKpi) {
+                    alert(
+                      "Configure primeiro um KPI de faturamento para registrar o dia."
+                    );
+                    return;
+                  }
                   if (!dailyDate) {
                     alert("Selecione uma data.");
                     return;
@@ -2047,7 +2390,7 @@ function AdminDashboard({
                     alert("Informe um valor válido para o dia.");
                     return;
                   }
-                  updateProgress(
+                  const ok = await updateProgress(
                     faturamentoKpi.id,
                     "diario",
                     true,
@@ -2055,7 +2398,9 @@ function AdminDashboard({
                     "",
                     { periodKey: dailyDate }
                   );
-                  setDailyValue("");
+                  if (ok) {
+                    setDailyValue("");
+                  }
                 }}
               >
                 Registrar dia
@@ -2126,6 +2471,12 @@ function AdminDashboard({
                               type="button"
                               className="rounded-md bg-sky-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-sky-700 active:bg-sky-800"
                               onClick={() => {
+                                if (!faturamentoKpi) {
+                                  alert(
+                                    "Configure primeiro um KPI de faturamento para atualizar valores."
+                                  );
+                                  return;
+                                }
                                 const raw =
                                   dailyEditValues[row.dateKey] || editValue;
                                 const normalized =
@@ -2180,8 +2531,8 @@ function AdminDashboard({
               </table>
             </div>
           </div>
+          </div>
         </section>
-      )}
 
       {/* Gestão de usuários */}
       <section>
@@ -2751,8 +3102,74 @@ function HistoryBlock({ kpi, progress }) {
 
 // ================== USER ==================
 
-function UserDashboard({ currentUser, kpis, progress, updateProgress }) {
+function UserDashboard({
+  currentUser,
+  kpis,
+  progress,
+  periodStatus,
+  historyEntries,
+  updateProgress,
+}) {
   const myKpis = kpis.filter((k) => k.ownerId === currentUser.id);
+
+  const [selectedKpiId, setSelectedKpiId] = useState(
+    myKpis[0]?.id || null
+  );
+  const [monthlySeries, setMonthlySeries] = useState([]);
+  const [monthlySeriesError, setMonthlySeriesError] = useState("");
+  const [monthlySeriesLoading, setMonthlySeriesLoading] = useState(false);
+
+  useEffect(() => {
+    if (!selectedKpiId) {
+      setMonthlySeries([]);
+      setMonthlySeriesError("");
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadSeries() {
+      try {
+        setMonthlySeriesLoading(true);
+        setMonthlySeriesError("");
+        const res = await fetch(
+          `${API_BASE_URL}/api/kpis/${selectedKpiId}/series/monthly`,
+          { credentials: "include" }
+        );
+
+        if (res.status === 401) {
+          window.alert("Sessão expirada. Faça login novamente.");
+          window.location.reload();
+          return;
+        }
+
+        if (!res.ok) {
+          setMonthlySeriesError("Erro ao carregar série mensal.");
+          return;
+        }
+
+        const data = await res.json();
+        if (!cancelled) {
+          setMonthlySeries(Array.isArray(data.series) ? data.series : []);
+        }
+      } catch (err) {
+        console.error("Erro ao carregar série mensal:", err);
+        if (!cancelled) {
+          setMonthlySeriesError("Erro ao carregar série mensal.");
+        }
+      } finally {
+        if (!cancelled) {
+          setMonthlySeriesLoading(false);
+        }
+      }
+    }
+
+    loadSeries();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedKpiId]);
 
   const chartData = myKpis.map((kpi) => {
     const weeklyStatus = getCurrentProgress(progress, kpi.id, "semanal");
@@ -2796,6 +3213,10 @@ function UserDashboard({ currentUser, kpis, progress, updateProgress }) {
     };
   });
 
+  const myHistory = historyEntries.filter(
+    (entry) => entry.userId === currentUser.id
+  );
+
   return (
     <div className="space-y-6">
       {myKpis.length > 0 && (
@@ -2827,6 +3248,93 @@ function UserDashboard({ currentUser, kpis, progress, updateProgress }) {
         </section>
       )}
 
+      {myKpis.length > 0 && (
+        <section>
+          <h2 className="text-lg font-semibold text-slate-900 mb-2">
+            Evolução mensal por KPI
+          </h2>
+          <p className="text-xs text-slate-600 mb-2">
+            Selecione um KPI para ver a evolução mensal consolidada. Para KPIs
+            semanais, os valores são somados por mês.
+          </p>
+          <div className="bg-white rounded-xl shadow-sm p-4 border border-slate-200 space-y-3">
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">
+                KPI
+              </label>
+              <select
+                value={selectedKpiId || ""}
+                onChange={(e) =>
+                  setSelectedKpiId(
+                    e.target.value ? Number(e.target.value) : null
+                  )
+                }
+                className="w-full max-w-xs rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+              >
+                <option value="">Selecione um KPI</option>
+                {myKpis.map((kpi) => (
+                  <option key={kpi.id} value={kpi.id}>
+                    {kpi.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {monthlySeriesLoading && (
+              <p className="text-xs text-slate-500">Carregando gráfico...</p>
+            )}
+            {monthlySeriesError && (
+              <p className="text-xs text-red-600">{monthlySeriesError}</p>
+            )}
+            {!monthlySeriesLoading &&
+              !monthlySeriesError &&
+              selectedKpiId &&
+              monthlySeries.length === 0 && (
+                <p className="text-xs text-slate-500">
+                  Ainda não há registros mensais para este KPI.
+                </p>
+              )}
+            {!monthlySeriesLoading && monthlySeries.length > 0 && (
+              <div className="h-56">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart
+                    data={monthlySeries.map((m) => ({
+                      mes: m.label,
+                      Valor: m.value,
+                      Meta: m.target || 0,
+                    }))}
+                  >
+                    <XAxis dataKey="mes" fontSize={10} />
+                    <YAxis
+                      tickFormatter={(v) => v.toLocaleString("pt-BR")}
+                      fontSize={10}
+                    />
+                    <Tooltip
+                      formatter={(v, name) =>
+                        name === "Valor"
+                          ? formatCurrency(v)
+                          : name === "Meta"
+                          ? formatCurrency(v)
+                          : v
+                      }
+                    />
+                    <Legend />
+                    <Bar dataKey="Valor" name="Valor realizado" fill="#0ea5e9" />
+                    <Line
+                      type="monotone"
+                      dataKey="Meta"
+                      name="Meta mensal"
+                      stroke="#f97316"
+                      strokeWidth={2}
+                    />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
       <section>
         <h2 className="text-lg font-semibold text-slate-900 mb-2">
           Minhas metas
@@ -2847,17 +3355,109 @@ function UserDashboard({ currentUser, kpis, progress, updateProgress }) {
                 key={kpi.id}
                 kpi={kpi}
                 progress={progress}
+                periodStatus={periodStatus}
+                isAdminUser={isAdminUserClient(currentUser)}
                 updateProgress={updateProgress}
               />
             ))}
           </div>
         )}
       </section>
+
+      {myHistory.length > 0 && (
+        <section>
+          <h2 className="text-lg font-semibold text-slate-900 mb-2">
+            Histórico dos meus registros
+          </h2>
+          <div className="bg-white rounded-xl shadow-sm p-4 border border-slate-200">
+            <p className="text-xs text-slate-600 mb-2">
+              Últimos registros enviados por você (semana e mês), com período e
+              prazo calculados pelo sistema.
+            </p>
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-[11px]">
+                <thead>
+                  <tr className="border-b border-slate-200 text-left">
+                    <th className="py-1 pr-2 font-medium text-slate-600">
+                      KPI
+                    </th>
+                    <th className="py-1 px-2 font-medium text-slate-600">
+                      Período
+                    </th>
+                    <th className="py-1 px-2 font-medium text-slate-600">
+                      Valor
+                    </th>
+                    <th className="py-1 px-2 font-medium text-slate-600">
+                      Prazo
+                    </th>
+                    <th className="py-1 px-2 font-medium text-slate-600">
+                      Enviado em
+                    </th>
+                    <th className="py-1 pl-2 font-medium text-slate-600">
+                      Comentário
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {myHistory.slice(0, 100).map((entry) => {
+                    const kpi = kpis.find((k) => k.id === entry.kpiId);
+                    const start =
+                      entry.startDate && new Date(entry.startDate);
+                    const end = entry.endDate && new Date(entry.endDate);
+                    const due = entry.dueDate && new Date(entry.dueDate);
+                    const submitted =
+                      entry.submittedAt && new Date(entry.submittedAt);
+                    const periodLabel =
+                      start && end
+                        ? `${start.toLocaleDateString(
+                            "pt-BR"
+                          )} → ${end.toLocaleDateString("pt-BR")}`
+                        : entry.periodKey;
+                    return (
+                      <tr
+                        key={entry.id}
+                        className="border-b border-slate-100 align-top"
+                      >
+                        <td className="py-1 pr-2 text-slate-900">
+                          {kpi ? kpi.name : `KPI #${entry.kpiId}`}
+                        </td>
+                        <td className="py-1 px-2 text-slate-700">
+                          {periodLabel}
+                        </td>
+                        <td className="py-1 px-2 text-slate-700">
+                          {entry.delivered && entry.value
+                            ? kpi && kpi.unitType === "valor"
+                              ? formatCurrency(entry.value)
+                              : entry.value
+                            : "-"}
+                        </td>
+                        <td className="py-1 px-2 text-slate-700">
+                          {due
+                            ? due.toLocaleDateString("pt-BR")
+                            : "-"}
+                        </td>
+                        <td className="py-1 px-2 text-slate-700">
+                          {submitted
+                            ? submitted.toLocaleString("pt-BR")
+                            : "-"}
+                        </td>
+                        <td className="py-1 pl-2 text-slate-600">
+                          {entry.comment || "-"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      )}
     </div>
   );
 }
 
-function KpiCard({ kpi, progress, updateProgress }) {
+function KpiCard({ kpi, progress, periodStatus, isAdminUser, updateProgress }) {
   const [weeklyValue, setWeeklyValue] = useState("");
   const [weeklyComment, setWeeklyComment] = useState("");
 
@@ -2868,6 +3468,25 @@ function KpiCard({ kpi, progress, updateProgress }) {
   const monthlyStatus = getCurrentProgress(progress, kpi.id, "mensal");
 
   const perf = getKpiPerformance(kpi, progress);
+
+  const weeklyInfo = periodStatus?.weekly || null;
+  const monthlyInfo = periodStatus?.monthly || null;
+
+  const weeklyClosed =
+    !isAdminUser && weeklyInfo && weeklyInfo.entryOpen === false;
+  const monthlyClosed =
+    !isAdminUser && monthlyInfo && monthlyInfo.entryOpen === false;
+
+  function formatDueDateLabel(dateStr) {
+    if (!dateStr) return null;
+    const d = new Date(dateStr);
+    if (Number.isNaN(d.getTime())) return null;
+    try {
+      return d.toLocaleDateString("pt-BR");
+    } catch (e) {
+      return null;
+    }
+  }
 
   function formatUnit(unitType) {
     if (unitType === "unidades") return "unid.";
@@ -3056,6 +3675,17 @@ function KpiCard({ kpi, progress, updateProgress }) {
             <div className="text-xs font-semibold text-slate-800 mb-1">
               Semana atual
             </div>
+            {weeklyInfo && (
+              <p className="text-[11px] text-slate-500 mb-1">
+                {weeklyClosed
+                  ? `Prazo encerrado em ${formatDueDateLabel(
+                      weeklyInfo.dueDate
+                    )}. Fale com o admin para ajustes.`
+                  : `Prazo para registro até ${formatDueDateLabel(
+                      weeklyInfo.dueDate
+                    )}.`}
+              </p>
+            )}
             {weeklyStatus && (
               <p className="text-[11px] text-slate-500 mb-2">
                 Último registro:{" "}
@@ -3093,19 +3723,22 @@ function KpiCard({ kpi, progress, updateProgress }) {
                     ? "Valor entregue na semana (ex.: 8.000,00)"
                     : `Valor entregue (ex.: 8 ${formatUnit(kpi.unitType)})`
                 }
-                className="w-full rounded-md border border-slate-300 px-2 py-1 text-[11px] outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                disabled={weeklyClosed}
+                className="w-full rounded-md border border-slate-300 px-2 py-1 text-[11px] outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed"
               />
               <textarea
                 value={weeklyComment}
                 onChange={(e) => setWeeklyComment(e.target.value)}
                 placeholder="Comentário (use se entregou abaixo da meta, teve atraso, etc. ou para justificar não entrega)"
                 rows={2}
-                className="w-full rounded-md border border-slate-300 px-2 py-1 text-[11px] outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                disabled={weeklyClosed}
+                className="w-full rounded-md border border-slate-300 px-2 py-1 text-[11px] outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed"
               />
 
               <button
                 type="submit"
-                className="mt-1 w-full rounded-md bg-emerald-600 py-1 text-[11px] font-semibold text-white hover:bg-emerald-700 active:bg-emerald-800"
+                disabled={weeklyClosed}
+                className="mt-1 w-full rounded-md bg-emerald-600 py-1 text-[11px] font-semibold text-white hover:bg-emerald-700 active:bg-emerald-800 disabled:bg-slate-300 disabled:cursor-not-allowed"
               >
                 Registrar semana
               </button>
@@ -3119,6 +3752,17 @@ function KpiCard({ kpi, progress, updateProgress }) {
             <div className="text-xs font-semibold text-slate-800 mb-1">
               Mês atual
             </div>
+            {monthlyInfo && (
+              <p className="text-[11px] text-slate-500 mb-1">
+                {monthlyClosed
+                  ? `Prazo encerrado em ${formatDueDateLabel(
+                      monthlyInfo.dueDate
+                    )}. Fale com o admin para ajustes.`
+                  : `Prazo para registro até ${formatDueDateLabel(
+                      monthlyInfo.dueDate
+                    )}.`}
+              </p>
+            )}
             {monthlyStatus && (
               <p className="text-[11px] text-slate-500 mb-2">
                 Último registro:{" "}
@@ -3156,19 +3800,22 @@ function KpiCard({ kpi, progress, updateProgress }) {
                     ? "Valor entregue no mês (ex.: 80.000,00)"
                     : `Valor entregue (ex.: 30 ${formatUnit(kpi.unitType)})`
                 }
-                className="w-full rounded-md border border-slate-300 px-2 py-1 text-[11px] outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                disabled={monthlyClosed}
+                className="w-full rounded-md border border-slate-300 px-2 py-1 text-[11px] outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed"
               />
               <textarea
                 value={monthlyComment}
                 onChange={(e) => setMonthlyComment(e.target.value)}
                 placeholder="Comentário (use se entregou abaixo da meta, teve atraso, etc. ou para justificar não entrega)"
                 rows={2}
-                className="w-full rounded-md border border-slate-300 px-2 py-1 text-[11px] outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
+                disabled={monthlyClosed}
+                className="w-full rounded-md border border-slate-300 px-2 py-1 text-[11px] outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed"
               />
 
               <button
                 type="submit"
-                className="mt-1 w-full rounded-md bg-emerald-600 py-1 text-[11px] font-semibold text-white hover:bg-emerald-700 active:bg-emerald-800"
+                disabled={monthlyClosed}
+                className="mt-1 w-full rounded-md bg-emerald-600 py-1 text-[11px] font-semibold text-white hover:bg-emerald-700 active:bg-emerald-800 disabled:bg-slate-300 disabled:cursor-not-allowed"
               >
                 Registrar mês
               </button>
