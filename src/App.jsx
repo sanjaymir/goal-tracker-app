@@ -1106,6 +1106,7 @@ function App() {
             onDeleteKpi={handleDeleteKpi}
             onImportData={handleImportData}
             onExportData={handleExportData}
+            onUpdateProgress={updateProgress}
           />
         ) : (
           <UserDashboard
@@ -1139,6 +1140,7 @@ function AdminDashboard({
   onDeleteKpi,
   onImportData,
   onExportData,
+  onUpdateProgress,
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -1447,7 +1449,7 @@ function AdminDashboard({
       const metaPeriodType =
         entryPeriodType === "mensal" ? "meta-mensal" : "meta-semanal";
       promises.push(
-        updateProgress(
+        onUpdateProgress(
           kpiIdNum,
           metaPeriodType,
           true,
@@ -1460,7 +1462,7 @@ function AdminDashboard({
 
     if (hasResult) {
       promises.push(
-        updateProgress(
+        onUpdateProgress(
           kpiIdNum,
           entryPeriodType,
           true,
@@ -2143,7 +2145,7 @@ function AdminDashboard({
                                     alert("Meta do mês inválida.");
                                     return;
                                   }
-                                  const resOk = await updateProgress(
+                                  const resOk = await onUpdateProgress(
                                     faturamentoKpi.id,
                                     "meta-mensal",
                                     true,
@@ -2161,7 +2163,7 @@ function AdminDashboard({
                                     alert("Valor de faturamento inválido.");
                                     return;
                                   }
-                                  const resOk = await updateProgress(
+                                  const resOk = await onUpdateProgress(
                                     faturamentoKpi.id,
                                     "mensal",
                                     true,
@@ -2382,7 +2384,7 @@ function AdminDashboard({
                     alert("Informe um valor válido para o dia.");
                     return;
                   }
-                  const ok = await updateProgress(
+                  const ok = await onUpdateProgress(
                     faturamentoKpi.id,
                     "diario",
                     true,
@@ -2479,7 +2481,7 @@ function AdminDashboard({
                                   );
                                   return;
                                 }
-                                updateProgress(
+                                onUpdateProgress(
                                   faturamentoKpi.id,
                                   "diario",
                                   true,
@@ -2502,7 +2504,7 @@ function AdminDashboard({
                                     .join("/")}?`
                                 );
                                 if (!confirmDelete) return;
-                                updateProgress(
+                                onUpdateProgress(
                                   faturamentoKpi.id,
                                   "diario",
                                   false,
