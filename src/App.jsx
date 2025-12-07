@@ -278,22 +278,15 @@ function App() {
         if (
           usersRes.status === 401 ||
           kpisRes.status === 401 ||
-          progressRes.status === 401 ||
-          statusRes.status === 401 ||
-          historyRes.status === 401
+          progressRes.status === 401
         ) {
+          // se qualquer chamada principal deu 401, força logout
           setGlobalError("Sessão expirada. Faça login novamente.");
           handleLogout();
           return;
         }
 
-        if (
-          !usersRes.ok ||
-          !kpisRes.ok ||
-          !progressRes.ok ||
-          !statusRes.ok ||
-          !historyRes.ok
-        ) {
+        if (!usersRes.ok || !kpisRes.ok || !progressRes.ok) {
           throw new Error("Falha ao carregar dados iniciais.");
         }
 
@@ -307,8 +300,8 @@ function App() {
           usersRes.json(),
           kpisRes.json(),
           progressRes.json(),
-          statusRes.json(),
-          historyRes.json(),
+          statusRes.ok ? statusRes.json() : Promise.resolve(null),
+          historyRes.ok ? historyRes.json() : Promise.resolve([]),
         ]);
 
         setUsers(usersData);
