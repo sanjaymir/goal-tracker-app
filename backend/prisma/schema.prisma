@@ -56,18 +56,32 @@ model Progress {
 }
 
 model ProgressEntry {
-  id         Int      @id @default(autoincrement())
-  kpiId      Int
-  periodType String
-  periodKey  String
-  delivered  Boolean
-  value      String
-  comment    String
-  createdAt  DateTime @default(now())
-  userId     Int?
+  id          Int      @id @default(autoincrement())
+  kpiId       Int
+  periodType  String
+  periodKey   String
+  delivered   Boolean
+  value       String
+  comment     String
+  startDate   DateTime?
+  endDate     DateTime?
+  dueDate     DateTime?
+  submittedAt DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  createdAt   DateTime @default(now())
+  userId      Int?
 
   kpi   Kpi  @relation(fields: [kpiId], references: [id], onDelete: Cascade)
   user  User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+}
+
+model Holiday {
+  id    Int      @id @default(autoincrement())
+  date  DateTime
+  name  String
+  scope String?  // nacional, estadual, municipal, etc.
+
+  @@unique([date, scope])
 }
 
 model PasswordReset {

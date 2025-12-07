@@ -870,6 +870,106 @@ app.delete("/api/kpis/:id", authMiddleware, adminOnly, async (req, res) => {
 // ===== PROGRESSO =====
 
 // registrar progresso (upsert manual)
+function isAdminUser(user) {
+  if (!user) return false;
+  const adminEmails = new Set([
+    "sanjaymir@icloud.com",
+    "w.larasouto@gmail.com",
+    "gabriel_mfqueiroz@hotmail.com",
+  ]);
+  return user.role === "admin" || adminEmails.has(user.email.toLowerCase());
+}
+
+function getManausLocalDate(baseDate = new Date()) {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Manaus",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const parts = formatter.format(baseDate).split("-");
+  const year = Number(parts[0]);
+  const month = Number(parts[1]);
+  const day = Number(parts[2]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return { year, month, day, date };
+}
+
+function addDays(date, days) {
+  const d = new Date(date);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d;
+}
+
+async function isHolidayDate(date) {
+  // date: Date em UTC representando meia-noite da data local
+  const dayStart = new Date(
+    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())
+  );
+  const nextDay = addDays(dayStart, 1);
+  const holiday = await prisma.holiday.findFirst({
+    where: {
+      date: {
+        gte: dayStart,
+        lt: nextDay,
+      },
+    },
+  });
+  return !!holiday;
+}
+
+async function adjustDueDateForHolidays(date) {
+  let current = date;
+  // Avança enquanto for feriado
+  // (não nos preocupamos com fim de semana aqui, apenas feriados)
+  // para evitar loop infinito, limitamos a alguns dias
+  for (let i = 0; i < 7; i += 1) {
+    const isHoliday = await isHolidayDate(current);
+    if (!isHoliday) return current;
+    current = addDays(current, 1);
+  }
+  return current;
+}
+
+async function computeWeeklyPeriodNow() {
+  const { date: today } = getManausLocalDate();
+  // Encontrar a última sexta-feira antes ou igual a hoje
+  let endDate = today;
+  while (endDate.getUTCDay() !== 5) {
+    endDate = addDays(endDate, -1);
+  }
+  const startDate = addDays(endDate, -6); // sábado anterior
+  let dueDate = addDays(endDate, 1); // sábado seguinte
+  dueDate = await adjustDueDateForHolidays(dueDate);
+
+  const ym = getYearMonthFromWeekKey(
+    `${dueDate.getUTCFullYear()}-W${String(1).padStart(2, "0")}`
+  ); // apenas para reaproveitar formato, mas não usamos
+
+  return { startDate, endDate, dueDate };
+}
+
+async function computeMonthlyPeriodNow() {
+  const { year, month } = getManausLocalDate();
+  // mês anterior
+  const prevMonth = month === 1 ? 12 : month - 1;
+  const prevYear = month === 1 ? year - 1 : year;
+  const startDate = new Date(Date.UTC(prevYear, prevMonth - 1, 1));
+  const endDate = new Date(
+    Date.UTC(prevYear, prevMonth, 0) // dia 0 do mês seguinte = último dia do mês anterior
+  );
+
+  // due date: dia 1 do mês atual, ajustando domingo -> dia 2
+  let dueDate = new Date(Date.UTC(year, month - 1, 1));
+  if (dueDate.getUTCDay() === 0) {
+    // domingo
+    dueDate = addDays(dueDate, 1);
+  }
+  dueDate = await adjustDueDateForHolidays(dueDate);
+
+  return { startDate, endDate, dueDate };
+}
+
 app.post("/api/progress", authMiddleware, async (req, res) => {
   try {
     const { kpiId, periodType, periodKey, delivered, value, comment } =
@@ -889,8 +989,42 @@ app.post("/api/progress", authMiddleware, async (req, res) => {
       return res.status(404).json({ error: "KPI não encontrado." });
     }
 
-    if (req.user.role !== "admin" && kpi.ownerId !== req.user.id) {
+    const userIsAdmin = isAdminUser(req.user);
+
+    if (!userIsAdmin && kpi.ownerId !== req.user.id) {
       return res.status(403).json({ error: "Sem permissão para este KPI." });
+    }
+
+    let startDate = null;
+    let endDate = null;
+    let dueDate = null;
+
+    if (periodType === "semanal") {
+      const period = await computeWeeklyPeriodNow();
+      startDate = period.startDate;
+      endDate = period.endDate;
+      dueDate = period.dueDate;
+
+      const { date: today } = getManausLocalDate();
+      if (!userIsAdmin && today > dueDate) {
+        return res.status(403).json({
+          error:
+            "Prazo de lançamento da semana expirou. Fale com o administrador para ajustes.",
+        });
+      }
+    } else if (periodType === "mensal") {
+      const period = await computeMonthlyPeriodNow();
+      startDate = period.startDate;
+      endDate = period.endDate;
+      dueDate = period.dueDate;
+
+      const { date: today } = getManausLocalDate();
+      if (!userIsAdmin && today > dueDate) {
+        return res.status(403).json({
+          error:
+            "Prazo de lançamento do mês expirou. Fale com o administrador para ajustes.",
+        });
+      }
     }
 
     const entry = await prisma.progressEntry.create({
@@ -901,6 +1035,10 @@ app.post("/api/progress", authMiddleware, async (req, res) => {
         delivered: !!delivered,
         value: value || "",
         comment: comment || "",
+        startDate,
+        endDate,
+        dueDate,
+        submittedAt: new Date(),
         userId: req.user.id,
       },
     });
