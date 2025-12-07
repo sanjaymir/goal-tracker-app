@@ -1073,8 +1073,6 @@ function App() {
     );
   }
 
-  const nonAdminUsers = users.filter((u) => u.role !== "admin");
-
   return (
     <div className="min-h-screen bg-slate-100">
       <header className="bg-white border-b border-slate-200">
@@ -1100,7 +1098,7 @@ function App() {
       <main className="max-w-5xl mx-auto px-4 py-6">
         {currentUser.role === "admin" ? (
           <AdminDashboard
-            users={nonAdminUsers}
+            users={users}
             allUsers={users}
             kpis={kpis}
             progress={progress}
