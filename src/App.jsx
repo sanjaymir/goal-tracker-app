@@ -286,7 +286,8 @@ function App() {
           return;
         }
 
-        if (!usersRes.ok || !kpisRes.ok || !progressRes.ok) {
+        // usuários e KPIs são críticos; progresso pode falhar sem quebrar o restante
+        if (!usersRes.ok || !kpisRes.ok) {
           throw new Error("Falha ao carregar dados iniciais.");
         }
 
@@ -299,7 +300,7 @@ function App() {
         ] = await Promise.all([
           usersRes.json(),
           kpisRes.json(),
-          progressRes.json(),
+          progressRes.ok ? progressRes.json() : Promise.resolve({}),
           statusRes.ok ? statusRes.json() : Promise.resolve(null),
           historyRes.ok ? historyRes.json() : Promise.resolve([]),
         ]);
