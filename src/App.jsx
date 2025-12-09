@@ -2202,8 +2202,8 @@ function AdminDashboard({
                 Gráfico de faturamento mensal (ano selecionado)
               </h4>
               <p className="text-[11px] text-slate-500 mb-2">
-                Barras mostram o faturamento realizado; a linha indica a meta do
-                mês.
+                Barras azuis mostram o faturamento realizado e barras cinzas
+                mostram a meta de faturamento do mês.
               </p>
               <div className="h-56">
                 <ResponsiveContainer width="100%" height="100%">
@@ -2228,12 +2228,17 @@ function AdminDashboard({
                       }
                     />
                     <Legend />
-                    <Bar dataKey="Faturamento" fill="#0ea5e9" />
-                    <Line
-                      type="monotone"
+                    <Bar
                       dataKey="Meta"
-                      stroke="#64748b"
-                      dot={{ r: 2 }}
+                      name="Meta"
+                      fill="#cbd5f5"
+                      radius={[2, 2, 0, 0]}
+                    />
+                    <Bar
+                      dataKey="Faturamento"
+                      name="Faturamento"
+                      fill="#0ea5e9"
+                      radius={[2, 2, 0, 0]}
                     />
                   </BarChart>
                 </ResponsiveContainer>
