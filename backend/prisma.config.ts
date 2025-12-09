@@ -5,9 +5,4 @@ export default defineConfig({
   migrations: {
     path: "prisma/migrations",
   },
-  datasource: {
-    // SQLite em arquivo local
-    url: "file:./dev.db",
-  },
 });
-
