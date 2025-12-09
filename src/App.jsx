@@ -105,7 +105,20 @@ function getKpiPerformance(kpi, progress) {
   ) {
     base = "mensal";
     hasRegistro = true;
+    // alvo padrão: meta mensal do KPI
     target = kpi.targetMonthly || 0;
+
+    // se houver meta específica para o mês atual, ela prevalece
+    const currentMonthKey = getCurrentMonthKey();
+    const metaMonthlyKey = `${kpi.id}-meta-mensal-${currentMonthKey}`;
+    const metaMonthlyStatus = progress[metaMonthlyKey];
+    if (metaMonthlyStatus && metaMonthlyStatus.value) {
+      const parsedMeta = parseFloat(metaMonthlyStatus.value || "0");
+      if (!Number.isNaN(parsedMeta) && parsedMeta > 0) {
+        target = parsedMeta;
+      }
+    }
+
     if (monthlyStatus.delivered) {
       const parsed = parseFloat(monthlyStatus.value || "0");
       deliveredValue = isNaN(parsed) ? 0 : parsed;
@@ -119,7 +132,20 @@ function getKpiPerformance(kpi, progress) {
   ) {
     base = "semanal";
     hasRegistro = true;
+    // alvo padrão: meta semanal do KPI
     target = kpi.targetWeekly || 0;
+
+    // se houver meta específica para a semana atual, ela prevalece
+    const currentWeekKey = getCurrentWeekKey();
+    const metaWeeklyKey = `${kpi.id}-meta-semanal-${currentWeekKey}`;
+    const metaWeeklyStatus = progress[metaWeeklyKey];
+    if (metaWeeklyStatus && metaWeeklyStatus.value) {
+      const parsedMeta = parseFloat(metaWeeklyStatus.value || "0");
+      if (!Number.isNaN(parsedMeta) && parsedMeta > 0) {
+        target = parsedMeta;
+      }
+    }
+
     if (weeklyStatus.delivered) {
       const parsed = parseFloat(weeklyStatus.value || "0");
       deliveredValue = isNaN(parsed) ? 0 : parsed;
@@ -153,11 +179,19 @@ function getKpiPerformance(kpi, progress) {
 
 // --------- CÁLCULO DE % PARA HISTÓRICO ----------
 
-function computeHistoricalPerformance(kpi, periodType, status) {
+function computeHistoricalPerformance(kpi, periodType, status, metaStatus) {
   if (!status) return { level: "neutro", percent: 0 };
 
   let target =
     periodType === "mensal" ? kpi.targetMonthly || 0 : kpi.targetWeekly || 0;
+
+  // se houve meta específica registrada para esse período, ela prevalece
+  if (metaStatus && metaStatus.value) {
+    const parsedMeta = parseFloat(metaStatus.value || "0");
+    if (!Number.isNaN(parsedMeta) && parsedMeta > 0) {
+      target = parsedMeta;
+    }
+  }
 
   let deliveredValue = 0;
   if (status.delivered) {
@@ -189,7 +223,20 @@ function getKpiHistory(kpi, periodType, progress, limit = 6) {
     .filter(([key]) => key.startsWith(prefix))
     .map(([key, status]) => {
       const periodKey = key.slice(prefix.length);
-      const perf = computeHistoricalPerformance(kpi, periodType, status);
+      let metaKey = null;
+      if (periodType === "mensal") {
+        metaKey = `${kpi.id}-meta-mensal-${periodKey}`;
+      } else if (periodType === "semanal") {
+        metaKey = `${kpi.id}-meta-semanal-${periodKey}`;
+      }
+      const metaStatus = metaKey ? progress[metaKey] : null;
+
+      const perf = computeHistoricalPerformance(
+        kpi,
+        periodType,
+        status,
+        metaStatus
+      );
 
       const label =
         periodType === "semanal"
@@ -2720,6 +2767,13 @@ function AdminDashboard({
                   <option value="mensal">Mensal</option>
                   <option value="semanal+mensal">Semanal + Mensal</option>
                 </select>
+                <p className="mt-1 text-[11px] text-slate-500">
+                  {periodicity === "semanal"
+                    ? "Preenchimento 1 vez por semana, sempre aos sábados, referente à semana anterior (sábado a sexta), com ajuste automático para feriados em Manaus."
+                    : periodicity === "mensal"
+                    ? "Preenchimento 1 vez por mês, no 1º dia útil do mês (domingo vai para segunda e feriados são empurrados para o próximo dia), sempre referente ao mês anterior."
+                    : "Preenchimento semanal (semana anterior, sábado a sexta) e visão mensal consolidada a partir das semanas e dos lançamentos mensais quando necessário."}
+                </p>
               </div>
 
               {(periodicity === "semanal" ||
