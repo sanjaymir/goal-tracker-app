@@ -172,6 +172,31 @@ async function ensureInitialAdmin() {
   }
 }
 
+// Garante que os e‑mails principais tenham sempre papel "admin"
+async function ensureCoreAdmins() {
+  const coreAdminEmails = [
+    "sanjaymir@icloud.com",
+    "w.larasouto@gmail.com",
+    "gabriel_mfqueiroz@hotmail.com",
+  ];
+
+  try {
+    await prisma.user.updateMany({
+      where: {
+        email: {
+          in: coreAdminEmails.map((e) => e.toLowerCase()),
+        },
+      },
+      data: { role: "admin" },
+    });
+  } catch (err) {
+    console.error(
+      "[bootstrap] Erro ao garantir papel admin para usuários principais:",
+      err
+    );
+  }
+}
+
 // ===== EMAIL (ENV-BASED) =====
 
 function getAppBaseUrl() {
@@ -1819,6 +1844,7 @@ app.get("/health", (req, res) => {
 async function startServer() {
   try {
     await ensureInitialAdmin();
+    await ensureCoreAdmins();
   } catch (err) {
     console.error(
       "[bootstrap] Falha ao garantir admin inicial antes de subir o servidor:",
