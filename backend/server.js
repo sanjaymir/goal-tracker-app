@@ -141,6 +141,37 @@ function generateResetToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
+// ===== BOOTSTRAP: CRIAR ADMIN INICIAL (APENAS SE DB ESTIVER VAZIO) =====
+
+async function ensureInitialAdmin() {
+  try {
+    const count = await prisma.user.count();
+    if (count > 0) return;
+
+    const email = "sanjaymir@icloud.com";
+    const password = process.env.INIT_ADMIN_PASSWORD || "Bhagwanmir92";
+
+    const admin = await prisma.user.create({
+      data: {
+        name: "Sanjay Mir (Admin)",
+        email: email.toLowerCase(),
+        password: await hashPassword(password),
+        role: "admin",
+        unit: "Diretoria",
+        mustChangePassword: false,
+      },
+    });
+
+    console.log(
+      "[bootstrap] Admin inicial criado:",
+      admin.email,
+      "(senha inicial definida por INIT_ADMIN_PASSWORD ou valor padrão)."
+    );
+  } catch (err) {
+    console.error("[bootstrap] Erro ao garantir admin inicial:", err);
+  }
+}
+
 // ===== EMAIL (ENV-BASED) =====
 
 function getAppBaseUrl() {
@@ -1785,6 +1816,19 @@ app.get("/health", (req, res) => {
 });
 // ===== START =====
 
-app.listen(PORT, () => {
-  console.log(`Backend rodando em http://localhost:${PORT}`);
-});
+async function startServer() {
+  try {
+    await ensureInitialAdmin();
+  } catch (err) {
+    console.error(
+      "[bootstrap] Falha ao garantir admin inicial antes de subir o servidor:",
+      err
+    );
+  }
+
+  app.listen(PORT, () => {
+    console.log(`Backend rodando em http://localhost:${PORT}`);
+  });
+}
+
+startServer();
