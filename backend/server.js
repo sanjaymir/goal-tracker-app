@@ -800,12 +800,22 @@ app.post("/api/kpis", authMiddleware, adminOnly, async (req, res) => {
         .json({ error: "Dados obrigatórios faltando." });
     }
 
+    let entryRule = "auto";
+    if (periodicity === "semanal") {
+      entryRule = "weekly_last_sat_fri";
+    } else if (periodicity === "mensal") {
+      entryRule = "monthly_prev_month";
+    } else if (periodicity === "semanal+mensal") {
+      entryRule = "weekly_and_monthly";
+    }
+
     const newKpi = await prisma.kpi.create({
       data: {
         name: String(name).trim(),
         description: String(description || "").trim(),
         unitType,
         periodicity,
+        entryRule,
         targetWeekly:
           periodicity === "semanal" || periodicity === "semanal+mensal"
             ? Number(targetWeekly || 0)
@@ -854,6 +864,7 @@ app.put("/api/kpis/:id", authMiddleware, adminOnly, async (req, res) => {
       targetWeekly,
       targetMonthly,
       ownerId,
+      entryRule,
     } = req.body || {};
 
     const data = {};
@@ -864,6 +875,17 @@ app.put("/api/kpis/:id", authMiddleware, adminOnly, async (req, res) => {
 
     if (periodicity) {
       data.periodicity = periodicity;
+      if (!entryRule || entryRule === "auto") {
+        if (periodicity === "semanal") {
+          data.entryRule = "weekly_last_sat_fri";
+        } else if (periodicity === "mensal") {
+          data.entryRule = "monthly_prev_month";
+        } else if (periodicity === "semanal+mensal") {
+          data.entryRule = "weekly_and_monthly";
+        }
+      } else {
+        data.entryRule = entryRule;
+      }
       data.targetWeekly =
         periodicity === "semanal" || periodicity === "semanal+mensal"
           ? Number(targetWeekly || 0)

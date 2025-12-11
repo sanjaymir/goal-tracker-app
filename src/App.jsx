@@ -2885,6 +2885,14 @@ function AdminDashboard({
                                 )}`
                           }`}
                       </p>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        Período de referência:{" "}
+                        {kpi.periodicity === "semanal"
+                          ? "Semana anterior (sábado a sexta), com prazo de preenchimento no sábado ajustado para feriados em Manaus."
+                          : kpi.periodicity === "mensal"
+                          ? "Mês anterior completo, com prazo de preenchimento no 1º dia útil (ajustado para domingo e feriados em Manaus)."
+                          : "Semana anterior (sábado a sexta) + consolidação mensal, seguindo as mesmas regras de prazo e feriados."}
+                      </p>
                       <div className="mt-2">{renderPerfBadge(kpi)}</div>
                     </div>
                     <div className="flex flex-col gap-1 self-start">

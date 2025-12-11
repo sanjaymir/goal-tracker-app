@@ -31,6 +31,8 @@ model Kpi {
   description   String
   unitType      String
   periodicity   String
+  /// Regra de referência do período de preenchimento (ex.: weekly_last_sat_fri, monthly_prev_month, weekly_and_monthly)
+  entryRule     String  @default("auto")
   targetWeekly  Int?
   targetMonthly Int?
 
