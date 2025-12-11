@@ -2841,15 +2841,29 @@ function AdminDashboard({
         {/* Lista de KPIs */}
         <div>
           <h3 className="text-sm font-semibold text-slate-800 mb-3">
-            KPIs cadastrados
+            KPIs do mês atual
           </h3>
           {kpis.length === 0 ? (
             <p className="text-sm text-slate-500">
               Nenhum KPI cadastrado ainda.
             </p>
-          ) : (
-            <div className="space-y-3">
-              {kpis.map((kpi) => (
+          ) : (() => {
+              const currentMonthKey = getCurrentMonthKey();
+              const currentKpis = kpis.filter((kpi) => {
+                const monthKey = `${kpi.id}-mensal-${currentMonthKey}`;
+                const metaKey = `${kpi.id}-meta-mensal-${currentMonthKey}`;
+                const hasMensal = !!(progress[monthKey] || progress[metaKey]);
+                const hasDaily = Object.keys(progress).some((key) =>
+                  key.startsWith(`${kpi.id}-diario-${currentMonthKey}-`)
+                );
+                return hasMensal || hasDaily;
+              });
+
+              const otherKpis = kpis.filter(
+                (k) => !currentKpis.some((c) => c.id === k.id)
+              );
+
+              const renderKpiCard = (kpi) => (
                 <div
                   key={kpi.id}
                   className="bg-white rounded-xl shadow-sm p-4 border border-slate-200"
@@ -3070,9 +3084,35 @@ function AdminDashboard({
                     </div>
                   )}
                 </div>
-              ))}
-            </div>
-          )}
+              );
+
+              return (
+                <>
+                  {currentKpis.length === 0 ? (
+                    <p className="text-sm text-slate-500 mb-4">
+                      Ainda não há registros de faturamento ou metas para o mês
+                      atual. Assim que os KPIs forem preenchidos neste mês,
+                      eles aparecerão aqui.
+                    </p>
+                  ) : (
+                    <div className="space-y-3 mb-6">
+                      {currentKpis.map(renderKpiCard)}
+                    </div>
+                  )}
+
+                  {otherKpis.length > 0 && (
+                    <>
+                      <h3 className="text-sm font-semibold text-slate-800 mb-3">
+                        Outros KPIs (períodos anteriores ou gerais)
+                      </h3>
+                      <div className="space-y-3">
+                        {otherKpis.map(renderKpiCard)}
+                      </div>
+                    </>
+                  )}
+                </>
+              );
+            })()}
         </div>
       </section>
     </div>
@@ -3155,6 +3195,29 @@ function HistoryBlock({ kpi, progress }) {
             Histórico mensal (últimos {monthlyHistory.length} meses)
           </div>
           <ul className="space-y-0.5">{monthlyHistory.map(renderItem)}</ul>
+          {/* Mini gráfico por KPI – evolução mensal em % */}
+          <div className="mt-2 h-32">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart
+                data={[...monthlyHistory]
+                  .slice()
+                  .reverse()
+                  .map((m) => ({
+                    mes: m.label,
+                    Percentual: m.percent,
+                  }))}
+              >
+                <XAxis dataKey="mes" fontSize={9} />
+                <YAxis
+                  tickFormatter={(v) => `${v}%`}
+                  fontSize={9}
+                  domain={[0, 200]}
+                />
+                <Tooltip formatter={(v) => `${v}%`} />
+                <Bar dataKey="Percentual" fill="#0ea5e9" />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
         </div>
       )}
     </div>
